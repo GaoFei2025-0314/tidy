@@ -1,0 +1,11 @@
+{
+  "name": "project-hygiene",
+  "owner": { "name": "project-hygiene maintainers" },
+  "plugins": [
+    {
+      "name": "project-hygiene",
+      "source": "./",
+      "description": "规范 AI 生成项目的文件整洁度：文件必要性、目录归属、命名、归档与 README 说明，附只读审计脚本。"
+    }
+  ]
+}

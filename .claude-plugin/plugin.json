@@ -1,0 +1,7 @@
+{
+  "name": "project-hygiene",
+  "version": "0.1.0",
+  "description": "规范 AI 生成项目的文件整洁度：文件必要性、目录归属、命名、归档与 README 说明，附只读审计脚本。",
+  "license": "MIT",
+  "keywords": ["project-structure", "cleanup", "hygiene", "maintainability", "skill"]
+}

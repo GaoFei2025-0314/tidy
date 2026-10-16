@@ -1,0 +1,25 @@
+# --- 系统与编辑器 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# --- 日志与临时文件 ---
+*.log
+*.tmp
+*.bak
+*.orig
+.scratch/
+tmp/
+
+# --- 密钥 ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
