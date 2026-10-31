@@ -1,173 +1,36 @@
 #!/usr/bin/env python3
-"""项目整洁度审计：扫描项目目录，报告结构与卫生问题。
+"""项目整洁度审计：扫描整个项目，报告结构与卫生问题。
 
-只依赖 Python 标准库。脚本只读，不会修改任何文件。
+只依赖 Python 标准库。默认只读；--init 和 --fix-gitignore 会写文件。
 
 用法:
     python3 audit.py [项目路径] [--format text|json] [--fail-on error|warn|never]
-                     [--max-root-files N] [--large-mb N]
+    python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .claude/hygiene.json 草稿
+    python3 audit.py [项目路径] --fix-gitignore   # 把未忽略的依赖 / 生成物 / 垃圾 / 密钥文件补进 .gitignore
 """
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
-SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
-
-# 依赖 / 缓存目录：出现即应被忽略，扫描时不进入
-DEPENDENCY_DIRS = {
-    "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", ".ipynb_checkpoints", ".parcel-cache", ".turbo", ".next", ".nuxt",
-    ".cache", ".tox", ".gradle",
-}
-# 常见生成物目录：通常应被忽略，但少数项目里是源码，因此只给 warn
-OUTPUT_DIRS = {"build", "dist", "out", "coverage", "htmlcov", "target", "renders"}
-# 永不扫描
-SKIP_DIRS = {".git", ".hg", ".svn"}
-
-JUNK_FILE_GLOBS = [
-    ".DS_Store", "Thumbs.db", "desktop.ini", "*.log", "*.tmp", "*.swp", "*~",
-    "*.bak", "*.orig", "*.pyc", "*.pyo",
-]
-SECRET_FILE_GLOBS = [
-    ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519", "credentials.json",
-    "service-account*.json", "*.p12", "*.keystore",
-]
-SECRET_ALLOW = {".env.example", ".env.sample", ".env.template"}
-
-# 版本 / 副本后缀：foo_v2, foo-new, foo.backup, foo copy, foo (1), 副本, 最终版
-VERSION_SUFFIX_RE = re.compile(
-    r"(?:[_\-. ](?:v\d+|new|old|backup|bak|copy|final|tmp|temp|orig|draft\d*|fixed|updated)"
-    r"|\s\(\d+\)|副本|最终版?|新版|旧版|备份)$",
-    re.IGNORECASE,
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from rules import (  # noqa: E402
+    CONFIG_PATH, DEPENDENCY_DIRS, KNOWN_DIR_PURPOSES, LOCKFILES, OUTPUT_DIRS, SEVERITY_ORDER,
+    SKIP_DIRS, Config, Finding, Project, apply_config, check_path, load_config,
 )
-# AI 常生成的任务报告类文档
-REPORT_DOC_RE = re.compile(
-    r"(SUMMARY|IMPLEMENTATION|REPORT|PROGRESS|CHANGES_|_CHANGES|FIX(ES)?_|_FIX|"
-    r"COMPLETE|STATUS|MIGRATION_NOTES|WALKTHROUGH|总结|报告|进度)",
-    re.IGNORECASE,
-)
-STANDARD_DOCS = {
-    "readme", "changelog", "license", "licence", "contributing", "code_of_conduct",
-    "security", "agents", "claude", "gemini", "notice", "authors", "support",
-}
-# 临时 / 调试脚本名
-SCRATCH_NAME_RE = re.compile(
-    r"^(test\d*|tmp\d*|temp\d*|scratch\w*|debug\w*|untitled\w*|foo|bar|demo\d*|"
-    r"playground|try\w*|check_\w+|a+|xxx)\.(py|js|ts|mjs|cjs|sh|txt|md|json)$",
-    re.IGNORECASE,
-)
-# 根目录允许的文件
-ROOT_ALLOWED_GLOBS = [
-    "README*", "LICENSE*", "LICENCE*", "CHANGELOG*", "CONTRIBUTING*", "CODE_OF_CONDUCT*",
-    "SECURITY*", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "NOTICE*", "AUTHORS*",
-    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml",
-    "bun.lockb", "bun.lock", ".npmrc", ".nvmrc", ".node-version", "pyproject.toml",
-    "requirements*.txt", "uv.lock", "poetry.lock", "Pipfile", "Pipfile.lock", "setup.py",
-    "setup.cfg", ".python-version", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum",
-    "tsconfig*.json", "jsconfig.json", "*.config.js", "*.config.ts", "*.config.mjs",
-    "*.config.cjs", "*.config.json", ".eslintrc*", "eslint.config.*", ".prettierrc*",
-    ".prettierignore", ".editorconfig", ".gitignore", ".gitattributes", ".dockerignore",
-    "Dockerfile*", "docker-compose*.yml", "compose*.yml", "Makefile", "justfile",
-    ".env.example", ".env.sample", "biome.json", "turbo.json", "nx.json", "vercel.json",
-    "netlify.toml", ".pre-commit-config.yaml", "ruff.toml", "mypy.ini", "pytest.ini",
-    "tox.ini", ".flake8", "renovate.json", ".releaserc*", "lerna.json", "deno.json",
-    "components.json", "index.html", ".env", ".DS_Store",
-]
-LOCKFILES = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"]
+
 EMPTY_OK = {"__init__.py", "py.typed", ".gitkeep", ".keep", ".nojekyll"}
 CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".sh", ".md", ".vue", ".svelte"}
-PORTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9._\-@+]+$")
 MAX_HASH_BYTES = 50 * 1024 * 1024
 MIN_HASH_BYTES = 64  # 太小的文件（如 "{}"）重复没有意义
-
-
-@dataclass
-class Finding:
-    rule: str
-    severity: str
-    path: str
-    message: str
-    suggestion: str = ""
-
-
-class Project:
-    def __init__(self, root: Path):
-        self.root = root.resolve()
-        self.is_git = self._git(["rev-parse", "--is-inside-work-tree"]) == "true"
-        self.tracked: set[str] = set()
-        self.tracked_dirs: set[str] = set()
-        self.ignored: set[str] = set()
-        self.gitignore_patterns: list[str] = []
-        if self.is_git:
-            self.tracked = set(self._git_z(["ls-files", "-z"]))
-            for t in self.tracked:
-                parts = t.split("/")[:-1]
-                for i in range(1, len(parts) + 1):
-                    self.tracked_dirs.add("/".join(parts[:i]))
-            self.ignored = set(
-                self._git_z(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"])
-            )
-        else:
-            gi = self.root / ".gitignore"
-            if gi.is_file():
-                for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith(("#", "!")):
-                        self.gitignore_patterns.append(line)
-
-    def _git(self, args: list[str]) -> str:
-        try:
-            out = subprocess.run(
-                ["git", "-C", str(self.root), *args], capture_output=True, text=True, check=True
-            )
-            return out.stdout.strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return ""
-
-    def _git_z(self, args: list[str]) -> list[str]:
-        try:
-            out = subprocess.run(["git", "-C", str(self.root), *args], capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return []
-        return [p for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
-
-    def is_ignored(self, rel: str, is_dir: bool) -> bool:
-        if self.is_git:
-            if rel in self.tracked:
-                return False
-            key = rel + "/" if is_dir else rel
-            if key in self.ignored:
-                return True
-            # 位于某个已忽略目录之下
-            parts = rel.split("/")
-            return any("/".join(parts[:i]) + "/" in self.ignored for i in range(1, len(parts)))
-        name = rel.rsplit("/", 1)[-1]
-        for pat in self.gitignore_patterns:
-            anchored = pat.startswith("/")
-            p = pat.strip("/")
-            if pat.endswith("/") and not is_dir:
-                continue
-            if anchored or "/" in p:
-                if fnmatch.fnmatch(rel, p) or rel.startswith(p + "/"):
-                    return True
-            elif fnmatch.fnmatch(name, p) or any(fnmatch.fnmatch(seg, p) for seg in rel.split("/")[:-1]):
-                return True
-        return False
-
-
-def matches_any(name: str, globs: list[str]) -> bool:
-    return any(fnmatch.fnmatch(name, g) for g in globs)
 
 
 def naming_style(stem: str) -> str | None:
@@ -178,7 +41,9 @@ def naming_style(stem: str) -> str | None:
     return None
 
 
-def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[list[Finding], dict]:
+def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
+    root = root.resolve()
+    cfg = cfg or load_config(root)
     proj = Project(root)
     findings: list[Finding] = []
     add = findings.append
@@ -186,18 +51,21 @@ def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[
     def tracked_note(rel: str) -> str:
         return "（已被 git 跟踪）" if rel in proj.tracked else ""
 
-    # ---------- 仓库级检查 ----------
+    # ---------- 仓库级 ----------
     if not proj.is_git:
         add(Finding("not-git-repo", "warn", ".", "项目不是 git 仓库，删除和移动无法回滚",
                     "整理前先 git init 并做一次初始提交"))
     if not any((root / n).is_file() for n in ("README.md", "README", "README.rst", "readme.md")):
         add(Finding("missing-readme", "error", ".", "缺少 README", "参考 assets/README.template.md 补充"))
     if not (root / ".gitignore").is_file():
-        add(Finding("missing-gitignore", "error", ".", "缺少 .gitignore", "参考 assets/gitignore/ 补充"))
+        add(Finding("missing-gitignore", "error", ".", "缺少 .gitignore", "运行 --fix-gitignore 或参考 assets/gitignore/"))
     present_locks = [f for f in LOCKFILES if (root / f).is_file()]
     if len(present_locks) > 1:
         add(Finding("multiple-lockfiles", "warn", ".", f"存在多个包管理器的 lockfile：{', '.join(present_locks)}",
                     "只保留实际使用的包管理器对应的 lockfile"))
+    if not cfg.exists:
+        add(Finding("no-layout", "info", CONFIG_PATH, "项目没有声明目录约定",
+                    f"运行 --init 生成 {CONFIG_PATH}，补全每个目录的用途；hooks 会据此引导 AI 把文件放对位置"))
 
     # ---------- 遍历 ----------
     stats = {"files": 0, "dirs": 0, "skipped_dirs": 0}
@@ -223,7 +91,7 @@ def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[
                                 f"git rm -r --cached {rel} 并加入 .gitignore"))
                 elif not ignored:
                     add(Finding("artifact-not-ignored", "error", rel + "/", "依赖 / 缓存目录未被 .gitignore 忽略",
-                                "加入 .gitignore"))
+                                "加入 .gitignore（可用 --fix-gitignore）"))
                 stats["skipped_dirs"] += 1
                 continue
             if d in OUTPUT_DIRS:
@@ -232,28 +100,21 @@ def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[
                                 "如确为生成物：git rm -r --cached 并加入 .gitignore，在 README 写明生成命令"))
                 elif not ignored:
                     add(Finding("artifact-not-ignored", "warn", rel + "/", "疑似生成物目录未被忽略",
-                                "如确为生成物，加入 .gitignore"))
+                                "如确为生成物，加入 .gitignore（可用 --fix-gitignore）"))
                     stats["skipped_dirs"] += 1
                     continue
             if ignored:
                 stats["skipped_dirs"] += 1
                 continue
             keep_dirs.append(d)
-
-            if not PORTABLE_NAME_RE.match(d):
-                add(Finding("non-portable-name", "warn", rel + "/", "目录名含中文、空格或特殊字符",
-                            "改为 ASCII kebab-case 名称"))
-            if VERSION_SUFFIX_RE.search(d):
-                add(Finding("version-suffix", "warn", rel + "/", "目录名带版本 / 副本后缀",
-                            "确认当前版本后合并，旧版交给 git 历史"))
+            findings.extend(check_path(rel, cfg, is_dir=True))
         dirnames[:] = keep_dirs
 
         if rel_dir:
             stats["dirs"] += 1
             visible = [f for f in filenames if not proj.is_ignored(f"{rel_dir}/{f}", False)]
             if not dirnames and not visible:
-                add(Finding("empty-dir", "info", rel_dir + "/", "空目录（或只含被忽略的文件）",
-                            "不需要就删除"))
+                add(Finding("empty-dir", "info", rel_dir + "/", "空目录（或只含被忽略的文件）", "不需要就删除"))
             elif not dirnames and set(visible) <= {".gitkeep", ".keep"}:
                 add(Finding("empty-dir", "info", rel_dir + "/", "只有占位文件的目录", "确认是否真的需要"))
         if depth > 7:
@@ -267,53 +128,37 @@ def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[
             ignored = proj.is_ignored(rel, False)
             is_tracked = rel in proj.tracked
 
-            # 密钥文件：未忽略或被跟踪都是错误
-            if matches_any(f, SECRET_FILE_GLOBS) and f not in SECRET_ALLOW:
+            path_findings = check_path(rel, cfg)
+            secret = [x for x in path_findings if x.rule == "secret-file"]
+            if secret:
                 if is_tracked:
                     add(Finding("secret-tracked", "error", rel, "密钥 / 凭据文件被 git 跟踪",
-                                "立即轮换密钥；git rm --cached 并加入 .gitignore；必要时清理历史"))
+                                "立即轮换密钥；git rm --cached 并加入 .gitignore；必要时清理 git 历史"))
                 elif not ignored:
                     add(Finding("secret-not-ignored", "error", rel, "密钥 / 凭据文件未被忽略",
-                                "加入 .gitignore，提供 .env.example 代替"))
+                                "加入 .gitignore（可用 --fix-gitignore），提供 .env.example 代替"))
                 continue
             if ignored:
                 continue
 
             stats["files"] += 1
+            for x in path_findings:
+                if x.rule == "junk-file":
+                    x.message += tracked_note(rel)
+            findings.extend(path_findings)
+            if any(x.rule == "junk-file" for x in path_findings):
+                continue
+
             stem, ext = os.path.splitext(f)
             try:
                 size = fpath.stat().st_size
             except OSError:
                 continue
-
-            if matches_any(f, JUNK_FILE_GLOBS):
-                add(Finding("junk-file", "warn", rel, f"系统 / 临时 / 日志文件{tracked_note(rel)}",
-                            "删除并加入 .gitignore"))
-                continue
-
-            if not PORTABLE_NAME_RE.match(f):
-                add(Finding("non-portable-name", "warn", rel, "文件名含中文、空格或特殊字符",
-                            "改为 ASCII kebab-case 名称，中文写进文件标题"))
-
-            if VERSION_SUFFIX_RE.search(stem):
-                add(Finding("version-suffix", "warn", rel, "文件名带版本 / 副本后缀（v2、new、old、backup、copy、final…）",
-                            "确认当前版本后合并，删除副本，历史交给 git"))
-
-            if ext.lower() in (".md", ".txt") and stem.lower() not in STANDARD_DOCS and REPORT_DOC_RE.search(stem):
-                add(Finding("ai-report-doc", "warn", rel, "疑似 AI 任务报告 / 总结类文档",
-                            "有长期价值的内容合并进 README 或 docs/，其余删除；总结应写在 commit message"))
-
-            if SCRATCH_NAME_RE.match(f) and not rel.startswith(("tests/", "test/")):
-                add(Finding("scratch-file", "warn", rel, "疑似临时 / 调试脚本",
-                            "删除；如需保留，按用途重命名并移入 scripts/"))
-
             if size == 0 and f not in EMPTY_OK:
                 add(Finding("empty-file", "info", rel, "空文件", "不需要就删除"))
-
-            if size > large_mb * 1024 * 1024:
+            if size > cfg.large_file_mb * 1024 * 1024:
                 add(Finding("large-file", "warn", rel, f"大文件 {size / 1024 / 1024:.1f} MB{tracked_note(rel)}",
                             "生成物则忽略；素材考虑 Git LFS 或外部存储，并在 README 说明获取方式"))
-
             if MIN_HASH_BYTES <= size <= MAX_HASH_BYTES:
                 h = hashlib.sha1()
                 try:
@@ -324,77 +169,115 @@ def audit(root: Path, max_root_files: int = 15, large_mb: float = 5.0) -> tuple[
                     pass
                 else:
                     hashes.setdefault((size, h.hexdigest()), []).append(rel)
-
             style = naming_style(stem)
             if style and ext.lower() in CODE_EXTS:
                 by_dir_style[(rel_dir, ext.lower())][style].append(f)
 
-    # ---------- 根目录 ----------
-    root_files = sorted(
-        p.name for p in root.iterdir()
-        if p.is_file() and not proj.is_ignored(p.name, False)
-    )
-    if len(root_files) > max_root_files:
-        add(Finding("root-clutter", "warn", ".", f"根目录有 {len(root_files)} 个文件（建议 ≤ {max_root_files}）",
+    # ---------- 根目录文件数 ----------
+    root_files = [p.name for p in root.iterdir() if p.is_file() and not proj.is_ignored(p.name, False)]
+    if len(root_files) > cfg.max_root_files:
+        add(Finding("root-clutter", "warn", ".", f"根目录有 {len(root_files)} 个文件（建议 ≤ {cfg.max_root_files}）",
                     "非入口级文件移入 src/、scripts/、docs/ 等目录"))
-    # 这些规则已经给出了处理建议，不再重复报告位置问题
-    already_flagged = {f.path for f in findings
-                       if f.rule in ("junk-file", "ai-report-doc", "scratch-file", "secret-tracked")}
-    for name in root_files:
-        if matches_any(name, ROOT_ALLOWED_GLOBS) or name in already_flagged:
-            continue
-        ext = os.path.splitext(name)[1].lower()
-        if ext in (".md", ".txt", ".rst", ".docx", ".pdf"):
-            hint = "文档移入 docs/"
-        elif ext in (".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".ps1", ".bat"):
-            hint = "脚本移入 scripts/（或删除一次性脚本）"
-        elif ext in (".mp3", ".wav", ".mp4", ".mov", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"):
-            hint = "素材移入 public/ 或 assets/；生成物则忽略"
-        else:
-            hint = "确认是否需要放在根目录"
-        add(Finding("root-stray-file", "warn", name, "根目录下的非入口级文件", hint))
 
     # ---------- 重复文件 ----------
-    for (_, _), paths in hashes.items():
+    for paths in hashes.values():
         if len(paths) > 1:
             add(Finding("duplicate-file", "info", paths[0], f"内容完全相同的文件：{', '.join(paths)}",
                         "保留一份并修正引用"))
 
     # ---------- 命名风格混用 ----------
     for (d, ext), styles in by_dir_style.items():
-        if len(styles) > 1 and all(len(v) >= 1 for v in styles.values()) and sum(map(len, styles.values())) >= 3:
+        if len(styles) > 1 and sum(map(len, styles.values())) >= 3:
             detail = "；".join(f"{k}: {', '.join(v[:3])}" for k, v in styles.items())
-            add(Finding("mixed-naming", "info", (d or ".") + "/", f"同目录 {ext} 文件混用 kebab-case 与 snake_case（{detail}）",
-                        "统一为该语言惯用风格"))
+            add(Finding("mixed-naming", "info", (d or ".") + "/",
+                        f"同目录 {ext} 文件混用 kebab-case 与 snake_case（{detail}）", "统一为该语言惯用风格"))
 
-    # ---------- README 是否说明顶层目录 ----------
+    # ---------- README / layout 是否说明顶层目录 ----------
     readme = next((root / n for n in ("README.md", "readme.md", "README") if (root / n).is_file()), None)
-    if readme:
-        text = readme.read_text(encoding="utf-8", errors="replace")
-        for p in sorted(root.iterdir()):
-            if (p.is_dir() and not p.name.startswith(".") and p.name not in DEPENDENCY_DIRS
-                    and not proj.is_ignored(p.name, True) and p.name not in text):
-                add(Finding("readme-missing-dir", "info", p.name + "/", "README 未说明这个顶层目录的用途",
-                            "在 README「目录结构」中补一句说明"))
+    text = readme.read_text(encoding="utf-8", errors="replace") if readme else ""
+    for p in sorted(root.iterdir()):
+        if (not p.is_dir() or p.name.startswith(".") or p.name in DEPENDENCY_DIRS
+                or proj.is_ignored(p.name, True)):
+            continue
+        if readme and p.name not in text:
+            add(Finding("readme-missing-dir", "info", p.name + "/", "README 未说明这个顶层目录的用途",
+                        "在 README「目录结构」中补一句说明"))
+    for d in sorted(cfg.layout_dirs):
+        if not (root / d).exists():
+            add(Finding("layout-missing-dir", "info", d + "/", f"{CONFIG_PATH} 声明了该目录，但它不存在",
+                        "目录已废弃就从 layout 中移除"))
 
-    findings.sort(key=lambda x: (SEVERITY_ORDER[x.severity], x.rule, x.path))
+    # 去重（同一顶层目录下的多个文件会重复报告 undeclared-dir）
+    seen, unique = set(), []
+    for f in apply_config(findings, cfg):
+        if (f.rule, f.path) not in seen:
+            seen.add((f.rule, f.path))
+            unique.append(f)
+    unique.sort(key=lambda x: (SEVERITY_ORDER[x.severity], x.rule, x.path))
     summary = {
         "root": str(root),
         "git": proj.is_git,
+        "config": cfg.exists,
         "scanned_files": stats["files"],
         "scanned_dirs": stats["dirs"],
         "skipped_dirs": stats["skipped_dirs"],
-        "counts": {s: sum(1 for f in findings if f.severity == s) for s in SEVERITY_ORDER},
+        "counts": {s: sum(1 for f in unique if f.severity == s) for s in SEVERITY_ORDER},
     }
-    return findings, summary
+    return unique, summary
+
+
+def init_config(root: Path) -> Path:
+    """按现有顶层目录生成 .claude/hygiene.json 草稿。已存在时不覆盖。"""
+    target = root / CONFIG_PATH
+    if target.exists():
+        raise FileExistsError(target)
+    proj = Project(root)
+    layout = {}
+    for p in sorted(root.iterdir()):
+        if (p.is_dir() and p.name not in SKIP_DIRS and p.name not in DEPENDENCY_DIRS
+                and p.name not in OUTPUT_DIRS and not p.name.startswith(".")
+                and not proj.is_ignored(p.name, True)):
+            layout[p.name + "/"] = KNOWN_DIR_PURPOSES.get(p.name, "TODO: 说明这个目录放什么")
+    data = {"layout": layout, "allow": [], "rootAllow": [], "disable": []}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target
+
+
+def fix_gitignore(root: Path, findings: list[Finding]) -> list[str]:
+    """把未忽略（且未被跟踪）的依赖 / 生成物 / 垃圾 / 密钥文件补进 .gitignore。返回新增的条目。"""
+    entries: list[str] = []
+    for f in findings:
+        if f.rule == "artifact-not-ignored":
+            entries.append(f.path.rstrip("/").rsplit("/", 1)[-1] + "/")
+        elif f.rule == "secret-not-ignored":
+            name = f.path.rsplit("/", 1)[-1]
+            entries.append(".env*\n!.env.example" if name.startswith(".env") else name)
+        elif f.rule == "junk-file" and "已被 git 跟踪" not in f.message:
+            name = f.path.rsplit("/", 1)[-1]
+            ext = os.path.splitext(name)[1]
+            entries.append(f"*{ext}" if ext and not name.startswith(".") else name)
+    gi = root / ".gitignore"
+    existing = gi.read_text(encoding="utf-8").splitlines() if gi.is_file() else []
+    new = []
+    for e in dict.fromkeys(entries):
+        if all(line not in existing for line in e.splitlines()):
+            new.append(e)
+    if new:
+        with open(gi, "a", encoding="utf-8") as fh:
+            if existing and existing[-1].strip():
+                fh.write("\n")
+            fh.write("# added by project-hygiene\n" + "\n".join(new) + "\n")
+    return new
 
 
 def render_text(findings: list[Finding], summary: dict) -> str:
     icons = {"error": "✖ ERROR", "warn": "▲ WARN ", "info": "● INFO "}
     lines = [
         f"项目整洁度审计：{summary['root']}",
-        f"git 仓库：{'是' if summary['git'] else '否'}  扫描文件 {summary['scanned_files']} 个，"
-        f"目录 {summary['scanned_dirs']} 个（跳过已忽略 / 依赖目录 {summary['skipped_dirs']} 个）",
+        f"git 仓库：{'是' if summary['git'] else '否'}  目录约定：{'有' if summary['config'] else '无'}  "
+        f"扫描文件 {summary['scanned_files']} 个，目录 {summary['scanned_dirs']} 个"
+        f"（跳过已忽略 / 依赖目录 {summary['skipped_dirs']} 个）",
         "",
     ]
     if not findings:
@@ -410,25 +293,51 @@ def render_text(findings: list[Finding], summary: dict) -> str:
             lines.append(f"           → {f.suggestion}")
     c = summary["counts"]
     lines += ["", f"合计：{c['error']} error，{c['warn']} warn，{c['info']} info",
-              "提示：脚本是启发式检查，删除或移动前请先确认文件没有被引用。"]
+              "提示：脚本是启发式检查。删除或移动前用 refs.py 确认文件没有被引用。"]
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="项目整洁度审计（只读）")
+    ap = argparse.ArgumentParser(description="项目整洁度审计")
     ap.add_argument("path", nargs="?", default=".", help="项目根目录，默认当前目录")
     ap.add_argument("--format", choices=["text", "json"], default="text")
     ap.add_argument("--fail-on", choices=["error", "warn", "never"], default="never",
                     help="达到该级别时以非零状态退出（用于 CI）")
-    ap.add_argument("--max-root-files", type=int, default=15)
-    ap.add_argument("--large-mb", type=float, default=5.0)
+    ap.add_argument("--init", action="store_true", help=f"生成 {CONFIG_PATH} 草稿")
+    ap.add_argument("--fix-gitignore", action="store_true", help="把应忽略的文件补进 .gitignore")
     args = ap.parse_args(argv)
 
-    root = Path(args.path)
+    root = Path(args.path).resolve()
     if not root.is_dir():
         print(f"不是目录：{root}", file=sys.stderr)
         return 2
-    findings, summary = audit(root, args.max_root_files, args.large_mb)
+
+    if args.init:
+        try:
+            target = init_config(root)
+        except FileExistsError as e:
+            print(f"已存在，不覆盖：{e}", file=sys.stderr)
+            return 1
+        print(f"已生成 {target}，请补全每个目录的用途（TODO 项），并同步 README「目录结构」。")
+        return 0
+
+    findings, summary = audit(root)
+    if args.fix_gitignore:
+        added = fix_gitignore(root, findings)
+        if added:
+            print("已追加到 .gitignore：")
+            for e in added:
+                for line in e.splitlines():
+                    print(f"  {line}")
+        else:
+            print(".gitignore 无需修改。")
+        tracked = [f for f in findings if f.rule in ("tracked-artifact", "secret-tracked")
+                   or (f.rule == "junk-file" and "已被 git 跟踪" in f.message)]
+        if tracked:
+            print("以下内容已被 git 跟踪，需手动 git rm --cached（密钥还需轮换）：")
+            for f in tracked:
+                print(f"  {f.path}")
+        return 0
 
     if args.format == "json":
         print(json.dumps({"summary": summary, "findings": [asdict(f) for f in findings]},
