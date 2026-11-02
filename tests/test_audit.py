@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "skills/project-hygiene/scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "skills/tidy/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import audit  # noqa: E402
 import refs  # noqa: E402
@@ -76,7 +76,7 @@ class CleanProjectTest(unittest.TestCase):
             root = Path(d)
             write(root, "README.md", "# demo\n\n- src/ 源码\n- docs/ 文档\n")
             write(root, ".gitignore", "node_modules/\nout/\n.env\n")
-            write(root, ".claude/hygiene.json", json.dumps(LAYOUT))
+            write(root, ".claude/tidy.json", json.dumps(LAYOUT))
             write(root, "package.json", '{"name": "demo"}')
             write(root, "src/index.ts", "export const a = 1\n")
             write(root, "docs/prompts.md", "# 提示词\n")
@@ -170,7 +170,7 @@ class InitAndFixTest(unittest.TestCase):
             quiet.__enter__()
             self.addCleanup(quiet.__exit__, None, None, None)
             self.assertEqual(audit.main([str(root), "--init"]), 0)
-            cfg = json.loads((root / ".claude/hygiene.json").read_text(encoding="utf-8"))
+            cfg = json.loads((root / ".claude/tidy.json").read_text(encoding="utf-8"))
             self.assertEqual(set(cfg["layout"]), {"src/", "voice/"})
             self.assertEqual(audit.main([str(root), "--init"]), 1)  # 不覆盖
 
@@ -203,7 +203,7 @@ class HookTest(unittest.TestCase):
         self.root = Path(self._tmp.name)
         write(self.root, "README.md", "# demo\n- src/\n- docs/\n")
         write(self.root, ".gitignore", "node_modules/\n.scratch/\n")
-        write(self.root, ".claude/hygiene.json", json.dumps(LAYOUT))
+        write(self.root, ".claude/tidy.json", json.dumps(LAYOUT))
         write(self.root, "src/index.ts")
         write(self.root, "legacy_old.py")  # 会话前就存在的问题不应被 hook 追究
         git_commit_all(self.root)
@@ -249,7 +249,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.hook("stop", stop_hook_active=False)[0], 0)  # 已接受，不再重复提醒
 
     def test_hooks_can_be_disabled(self):
-        write(self.root, ".claude/hygiene.json", json.dumps({"hooks": False}))
+        write(self.root, ".claude/tidy.json", json.dumps({"hooks": False}))
         self.assertEqual(self.write_hook("FIX_REPORT.md")[0], 0)
 
 

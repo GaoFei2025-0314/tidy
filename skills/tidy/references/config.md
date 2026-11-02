@@ -1,4 +1,4 @@
-# `.claude/hygiene.json` 配置说明
+# `.claude/tidy.json` 配置说明
 
 项目级配置，放在 `.claude/` 下（不占根目录）。所有字段都可选；没有这个文件时只启用通用规则。
 

@@ -1,4 +1,4 @@
-# project-hygiene
+# tidy
 
 让 AI 写的项目保持整洁、可维护的 Claude Code 插件：**文件必要性、目录归属、命名、归档**，不靠 AI 自觉，而是靠机制。
 
@@ -18,7 +18,7 @@ tools/  voice/                               ← 没人说得清这些目录是�
 
 | 层 | 做什么 |
 |---|---|
-| **目录约定** `.claude/hygiene.json` | 声明项目里每个目录放什么。"新文件该放哪"从判断题变成查表题 |
+| **目录约定** `.claude/tidy.json` | 声明项目里每个目录放什么。"新文件该放哪"从判断题变成查表题 |
 | **Hooks（自动执行）** | ① 会话开始：把规则和目录约定注入给 AI<br>② AI 新建文件前：名字或位置不合规就**拦截**，并告诉它正确做法<br>③ 每轮结束：检查本轮**新增**的文件（包括用 Bash 创建的），有问题就要求先清理再结束 |
 | **Skill + 脚本** | 判断标准与整理流程；`audit.py` 全面审计、`refs.py` 查引用、`--fix-gitignore` 自动修复、`--init` 生成目录约定；`/tidy` 一键整理 |
 
@@ -29,7 +29,7 @@ Hooks 只追究**新增**的文件，老项目里已有的问题不会每轮反�
 AI 想新建 `src/Title_v2.tsx` 时：
 
 ```
-[project-hygiene] 拦截新建文件 src/Title_v2.tsx：
+[tidy] 拦截新建文件 src/Title_v2.tsx：
 - src/Title_v2.tsx：名称带版本 / 副本后缀（v2、new、old、backup、copy、final…）
   → 直接修改原文件，历史交给 git；已有副本则确认当前版本后合并删除
 ```
@@ -37,7 +37,7 @@ AI 想新建 `src/Title_v2.tsx` 时：
 AI 用 Bash 生成了临时脚本、构建产物和 `.env.local`，准备结束时：
 
 ```
-[project-hygiene] 结束前检查：本轮新增的文件有不符合整洁规范的地方，请先处理：
+[tidy] 结束前检查：本轮新增的文件有不符合整洁规范的地方，请先处理：
 - check_render.py：疑似临时 / 调试脚本
 - dist/：新出现的依赖 / 生成物目录未被忽略
 - src/.env.local：密钥 / 凭据文件未被忽略
@@ -48,8 +48,8 @@ AI 用 Bash 生成了临时脚本、构建产物和 `.env.local`，准备结束�
 ### 方式一：Claude Code 插件（推荐，包含 hooks）
 
 ```
-/plugin marketplace add <你的 GitHub 用户名>/project-hygiene-skill
-/plugin install project-hygiene@project-hygiene
+/plugin marketplace add <你的 GitHub 用户名>/tidy
+/plugin install tidy@tidy
 ```
 
 需要本机有 `python3`（3.9+），无第三方依赖。
@@ -57,7 +57,7 @@ AI 用 Bash 生成了临时脚本、构建产物和 `.env.local`，准备结束�
 ### 方式二：只装 skill + 手动配置 hooks
 
 ```bash
-cp -r skills/project-hygiene ~/.claude/skills/
+cp -r skills/tidy ~/.claude/skills/
 ```
 
 然后在 `~/.claude/settings.json`（全局）或项目的 `.claude/settings.json` 中加入：
@@ -65,16 +65,16 @@ cp -r skills/project-hygiene ~/.claude/skills/
 ```json
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/project-hygiene/scripts/hook.py session-start" }] }],
-    "PreToolUse": [{ "matcher": "Write", "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/project-hygiene/scripts/hook.py pre-write" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/project-hygiene/scripts/hook.py stop" }] }]
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/tidy/scripts/hook.py session-start" }] }],
+    "PreToolUse": [{ "matcher": "Write", "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/tidy/scripts/hook.py pre-write" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/skills/tidy/scripts/hook.py stop" }] }]
   }
 }
 ```
 
 ### 其他 AI 工具（Cursor、Codex 等）
 
-把 [`skills/project-hygiene/assets/agents-rules.md`](skills/project-hygiene/assets/agents-rules.md) 粘贴进项目的 `AGENTS.md`。没有 hooks，效果弱一些，可以配合 CI 审计兜底。
+把 [`skills/tidy/assets/agents-rules.md`](skills/tidy/assets/agents-rules.md) 粘贴进项目的 `AGENTS.md`。没有 hooks，效果弱一些，可以配合 CI 审计兜底。
 
 ## 使用
 
@@ -83,27 +83,29 @@ cp -r skills/project-hygiene ~/.claude/skills/
 在 Claude Code 里运行：
 
 ```
-/project-hygiene:tidy
+/tidy
 ```
 
-它会：扫描 → 查引用 → 给出整理方案表（**停下来等你确认**）→ 用 `git mv` 执行并修复引用 → 跑构建验证 → 生成 `.claude/hygiene.json` 目录约定。之后的会话都会自动遵守这份约定。
+（如果和其他插件重名，用全名 `/tidy:tidy`。）
+
+它会：扫描 → 查引用 → 给出整理方案表（**停下来等你确认**）→ 用 `git mv` 执行并修复引用 → 跑构建验证 → 生成 `.claude/tidy.json` 目录约定。之后的会话都会自动遵守这份约定。
 
 也可以直接说「帮我整理一下项目」「看看哪些文件是没用的」。
 
 ### 单独使用脚本
 
 ```bash
-S=skills/project-hygiene/scripts
+S=skills/tidy/scripts
 python3 $S/audit.py <项目>                    # 审计报告
 python3 $S/audit.py <项目> --fail-on error    # CI 中使用，有 error 时退出码 1
-python3 $S/audit.py <项目> --init             # 生成 .claude/hygiene.json 草稿
+python3 $S/audit.py <项目> --init             # 生成 .claude/tidy.json 草稿
 python3 $S/audit.py <项目> --fix-gitignore    # 把应忽略的内容补进 .gitignore（只追加）
 python3 $S/refs.py  <项目> src/Root_old.tsx   # 这个文件被谁引用？
 ```
 
 ### 目录约定示例
 
-`.claude/hygiene.json`（完整字段见 [config.md](skills/project-hygiene/references/config.md)）：
+`.claude/tidy.json`（完整字段见 [config.md](skills/tidy/references/config.md)）：
 
 ```json
 {
@@ -148,8 +150,7 @@ python3 $S/refs.py  <项目> src/Root_old.tsx   # 这个文件被谁引用？
 .
 ├── .claude-plugin/            # 插件与 marketplace 清单
 ├── hooks/hooks.json           # 插件 hooks：SessionStart / PreToolUse(Write) / Stop
-├── commands/tidy.md           # /project-hygiene:tidy 命令
-├── skills/project-hygiene/    # skill 本体
+├── skills/tidy/               # skill 本体，也是 /tidy 命令
 │   ├── SKILL.md               # 判断标准、整理流程、删除 vs 归档
 │   ├── references/            # 按需读取的细则：目录结构、必要性、命名、文档、配置
 │   ├── scripts/

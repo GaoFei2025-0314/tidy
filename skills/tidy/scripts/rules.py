@@ -1,4 +1,4 @@
-"""project-hygiene 的共享规则：命名 / 位置检查、项目配置、忽略判断、文件遍历。
+"""tidy 的共享规则：命名 / 位置检查、项目配置、忽略判断、文件遍历。
 
 audit.py（整体审计）、hook.py（Claude Code hooks）、refs.py（引用查找）都基于本模块，
 保证三者对"什么是不规范"的判断完全一致。只依赖 Python 标准库。
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterator
 
 SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
-CONFIG_PATH = ".claude/hygiene.json"
+CONFIG_PATH = ".claude/tidy.json"
 
 # 依赖 / 缓存目录：出现即应被忽略，扫描时不进入
 DEPENDENCY_DIRS = {
@@ -105,7 +105,7 @@ class Finding:
 
 @dataclass
 class Config:
-    """项目级配置，来自 .claude/hygiene.json（可选）。"""
+    """项目级配置，来自 .claude/tidy.json（可选）。"""
     layout: dict[str, str] = field(default_factory=dict)   # "src/": "源码"
     allow: list[str] = field(default_factory=list)          # 豁免的路径 glob
     root_allow: list[str] = field(default_factory=list)     # 额外允许放在根目录的文件 glob

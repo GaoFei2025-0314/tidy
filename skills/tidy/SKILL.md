@@ -1,9 +1,9 @@
 ---
-name: project-hygiene
-description: 规范 AI 生成项目的文件整洁度与可维护性——判断每个文件是否必要、应该放在哪、该删除还是归档，保持根目录干净、命名一致、目录约定清楚。Use when creating or scaffolding a project, before creating any new file (scratch/debug scripts, summary reports, *_v2 / *_backup copies, generated outputs), when a project-hygiene hook blocks a file or flags new files, when finishing a coding task, or when the user asks to 整理 / 清理 / 规范 / 归档 a project, says the repo is messy (项目太乱、文件太多、看不懂、不知道哪些文件有用), or asks for a project structure audit.
+name: tidy
+description: 规范 AI 生成项目的文件整洁度与可维护性——判断每个文件是否必要、应该放在哪、该删除还是归档，保持根目录干净、命名一致、目录约定清楚。Use when creating or scaffolding a project, before creating any new file (scratch/debug scripts, summary reports, *_v2 / *_backup copies, generated outputs), when a tidy hook blocks a file or flags new files, when finishing a coding task, or when the user asks to 整理 / 清理 / 规范 / 归档 a project, says the repo is messy (项目太乱、文件太多、看不懂、不知道哪些文件有用), or asks for a project structure audit.
 ---
 
-# Project Hygiene · 项目整洁规范
+# Tidy · 项目整洁规范
 
 仓库里的每个文件都必须能回答三个问题：
 
@@ -11,11 +11,13 @@ description: 规范 AI 生成项目的文件整洁度与可维护性——判断
 2. **为什么在这里？**（归属）——按本项目的目录约定，它属于哪个目录？
 3. **别人看得懂吗？**（可读性）——只看文件名和 README，新人能猜到它是干什么的吗？
 
+> 用户输入 `/tidy` 时，直接执行下文「模式二：整理已有项目」。
+
 ## 三层机制
 
 | 层 | 作用 | 由谁执行 |
 |---|---|---|
-| **目录约定** `.claude/hygiene.json` | 声明每个顶层目录放什么，把"该放哪"从判断变成查表 | 你在整理项目时生成，之后长期维护 |
+| **目录约定** `.claude/tidy.json` | 声明每个顶层目录放什么，把"该放哪"从判断变成查表 | 你在整理项目时生成，之后长期维护 |
 | **Hooks**（随插件安装） | 会话开始注入规则和目录约定；拦截不合规的新文件；每轮结束检查新增文件 | 自动，见下文「收到 hook 提示时」 |
 | **本 skill** | 写代码时的判断标准、整理老项目的流程 | 你 |
 
@@ -30,7 +32,7 @@ Hooks 只检查**新增**的文件，老项目已有的问题由「模式二」�
 | 问题 | 不通过时怎么做 |
 |---|---|
 | **必要吗？** 能否写进已有文件？是否只是一次性的？ | 合并进已有文件；一次性内容写在回复里，不落盘 |
-| **放哪？** 符合 `.claude/hygiene.json` 的 layout 吗？ | 放进已声明的目录；确需新顶层目录时，先在 layout 和 README「目录结构」登记 |
+| **放哪？** 符合 `.claude/tidy.json` 的 layout 吗？ | 放进已声明的目录；确需新顶层目录时，先在 layout 和 README「目录结构」登记 |
 | **叫什么？** 名字能说明用途、和同目录风格一致吗？ | 按 [references/naming.md](references/naming.md) 命名 |
 | **该提交吗？** 是生成物、依赖、密钥、大文件吗？ | 加进 `.gitignore`，不进版本库 |
 
@@ -52,7 +54,7 @@ Hooks 只检查**新增**的文件，老项目已有的问题由「模式二」�
 
 - **新建文件被拦截**：按提示换做法——合并进已有文件、换目录、换名字，或者干脆不落盘。**不要**为了绕过拦截改用 Bash 写文件（Stop 检查照样会发现）。
 - **结束前检查列出了问题**：逐条处理（删除临时文件、合并副本、移动、补 `.gitignore`），处理完再结束。
-- **用户明确要求这样做**（比如就要一个中文文件名）：把路径加进 `.claude/hygiene.json` 的 `allow`，并在回复中说明。不要自作主张加豁免。
+- **用户明确要求这样做**（比如就要一个中文文件名）：把路径加进 `.claude/tidy.json` 的 `allow`，并在回复中说明。不要自作主张加豁免。
 - **需要新的顶层目录**：先确认确实没有合适的已有目录，再在 `layout` 和 README「目录结构」中登记。
 
 ---
@@ -106,7 +108,7 @@ python3 <skill>/scripts/audit.py <项目根目录> --format json
 整理完后，生成目录约定，让以后的每个会话自动遵守：
 
 ```bash
-python3 <skill>/scripts/audit.py <根目录> --init     # 按现有顶层目录生成 .claude/hygiene.json 草稿
+python3 <skill>/scripts/audit.py <根目录> --init     # 按现有顶层目录生成 .claude/tidy.json 草稿
 ```
 
 然后补全每个目录的说明（替换 `TODO`），写法要能指导放置决策，例如 `"public/": "staticFile() 读取的素材：图片、字体、配音"`，而不是只写"静态资源"。同步更新 README「目录结构」。配置格式见 [references/config.md](references/config.md)。
@@ -144,7 +146,7 @@ python3 <skill>/scripts/audit.py <根目录> --init     # 按现有顶层目录�
 | [references/file-necessity.md](references/file-necessity.md) | 判断文件是否必要、常见可删样板 | 判断能不能删 |
 | [references/naming.md](references/naming.md) | 各语言命名约定、禁止的命名模式 | 新建或重命名文件 |
 | [references/docs.md](references/docs.md) | README 最低要求、docs/ 布局、归档规则 | 写文档、归档 |
-| [references/config.md](references/config.md) | `.claude/hygiene.json` 字段说明与示例 | 生成或修改目录约定 |
+| [references/config.md](references/config.md) | `.claude/tidy.json` 字段说明与示例 | 生成或修改目录约定 |
 | [assets/README.template.md](assets/README.template.md) | README 模板 | 项目缺 README |
 | [assets/gitignore/](assets/gitignore/) | `.gitignore` 片段：通用、Node、Python、媒体 | 补全忽略规则 |
 | [assets/agents-rules.md](assets/agents-rules.md) | 可粘贴进 AGENTS.md 的规则（给不支持 hooks 的其他 AI 工具） | 项目也用 Cursor / Codex 等 |

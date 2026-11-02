@@ -1,10 +1,10 @@
 {
-  "description": "project-hygiene：会话开始注入整洁规范与目录约定；拦截不合规的新文件；每轮结束检查新增文件",
+  "description": "tidy：会话开始注入整洁规范与目录约定；拦截不合规的新文件；每轮结束检查新增文件",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/project-hygiene/scripts/hook.py\" session-start", "timeout": 20 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" session-start", "timeout": 20 }
         ]
       }
     ],
@@ -12,14 +12,14 @@
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/project-hygiene/scripts/hook.py\" pre-write", "timeout": 10 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" pre-write", "timeout": 10 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/project-hygiene/scripts/hook.py\" stop", "timeout": 20 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" stop", "timeout": 20 }
         ]
       }
     ]

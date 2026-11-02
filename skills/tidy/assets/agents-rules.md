@@ -16,4 +16,4 @@
 
 删除或批量移动文件前先征得同意；移动文件用 `git mv`，并修复所有引用。
 
-目录约定见 `.claude/hygiene.json` 的 `layout`：新文件放进已声明的目录，确需新顶层目录时先在 layout 和 README 中登记。
+目录约定见 `.claude/tidy.json` 的 `layout`：新文件放进已声明的目录，确需新顶层目录时先在 layout 和 README 中登记。

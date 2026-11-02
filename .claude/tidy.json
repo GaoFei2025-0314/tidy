@@ -1,8 +1,7 @@
 {
   "layout": {
     "skills/": "skill 本体：SKILL.md、references/ 细则、scripts/ 脚本、assets/ 模板",
-    "hooks/": "插件 hooks 声明（hooks.json），实际逻辑在 skills/project-hygiene/scripts/hook.py",
-    "commands/": "插件斜杠命令",
+    "hooks/": "插件 hooks 声明（hooks.json），实际逻辑在 skills/tidy/scripts/hook.py",
     "tests/": "单元测试"
   }
 }

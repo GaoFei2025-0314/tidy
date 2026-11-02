@@ -6,7 +6,7 @@
     hook.py stop            每轮结束：检查本轮新增的文件（包括 Bash 创建的），不合规就要求先清理
 
 只检查"新增"的文件，老项目里已有的问题不会反复打扰；整理老项目请用 audit.py。
-在 .claude/hygiene.json 里写 "hooks": false 可对单个项目关闭。
+在 .claude/tidy.json 里写 "hooks": false 可对单个项目关闭。
 
 hook 输入是 stdin 上的 JSON。退出码 2 表示拦截，stderr 内容会反馈给 Claude。
 任何意外错误都放行（退出码 0），绝不因为 hook 自身的问题卡住用户。
@@ -27,7 +27,7 @@ from rules import (  # noqa: E402
 )
 
 CORE_RULES = """\
-[project-hygiene] 本项目启用了文件整洁规范：
+[tidy] 本项目启用了文件整洁规范：
 - 新建文件前先问：能否并入已有文件？该放哪个目录？名字是否说明用途（ASCII、与同目录风格一致）？是否应被 .gitignore？
 - 不要创建：临时 / 调试脚本、*_v2 / *_new / *_old / *.bak 副本、*_SUMMARY.md / *_REPORT.md 等任务报告、根目录杂项文件。
 - 临时文件放 .scratch/（需被忽略）或系统临时目录，任务结束前删除；总结写在回复和 commit message 里。
@@ -40,7 +40,7 @@ def project_root(data: dict) -> Path:
 
 def state_file(root: Path, session_id: str) -> Path:
     key = hashlib.sha1(str(root).encode()).hexdigest()[:12]
-    d = Path(tempfile.gettempdir()) / "project-hygiene" / key
+    d = Path(tempfile.gettempdir()) / "tidy" / key
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{session_id or 'default'}.json"
 
@@ -87,7 +87,7 @@ def check_new_entries(new: set[str], cfg: Config) -> list[Finding]:
     for rel in sorted(new):
         if rel.endswith("/"):
             findings.append(Finding("artifact-not-ignored", "warn", rel, "新出现的依赖 / 生成物目录未被忽略",
-                                    "加入 .gitignore；如果它确实是源码目录，在 .claude/hygiene.json 的 allow 中豁免"))
+                                    "加入 .gitignore；如果它确实是源码目录，在 .claude/tidy.json 的 allow 中豁免"))
             continue
         for f in check_path(rel, cfg):
             if f.rule == "secret-file":
@@ -110,7 +110,7 @@ def on_session_start(data: dict, root: Path, cfg: Config) -> int:
         out.append(f"本项目目录约定（{CONFIG_PATH}）——新文件必须放进这些目录，确需新目录先登记：")
         out += [f"  {k.rstrip('/')}/ — {v}" for k, v in cfg.layout.items()]
     else:
-        out.append(f"本项目尚未声明目录约定（{CONFIG_PATH}）。用户要求整理项目时，使用 project-hygiene skill。")
+        out.append(f"本项目尚未声明目录约定（{CONFIG_PATH}）。用户要求整理项目时，使用 tidy skill。")
     print("\n".join(out))
     return 0
 
@@ -138,7 +138,7 @@ def on_pre_write(data: dict, root: Path, cfg: Config) -> int:
     if not findings:
         return 0
     print(
-        f"[project-hygiene] 拦截新建文件 {rel}：\n{format_findings(findings)}\n"
+        f"[tidy] 拦截新建文件 {rel}：\n{format_findings(findings)}\n"
         f"请换一种做法（合并进已有文件 / 换位置 / 换名字 / 不落盘）。"
         f"如果这是用户明确要求的，把该路径加入 {CONFIG_PATH} 的 allow 后重试。",
         file=sys.stderr,
@@ -160,7 +160,7 @@ def on_stop(data: dict, root: Path, cfg: Config) -> int:
         save(sf, current)
         return 0
     print(
-        "[project-hygiene] 结束前检查：本轮新增的文件有不符合整洁规范的地方，请先处理：\n"
+        "[tidy] 结束前检查：本轮新增的文件有不符合整洁规范的地方，请先处理：\n"
         f"{format_findings(findings)}\n"
         "处理方式：删除临时文件；把副本合并回原文件；移动到正确目录；或补进 .gitignore。"
         f"如果是用户明确要求保留的，加入 {CONFIG_PATH} 的 allow，并在回复中说明。",
@@ -185,7 +185,7 @@ def main() -> int:
             return 0
         return HANDLERS[sys.argv[1]](data, root, cfg)
     except Exception as e:  # noqa: BLE001 — hook 自身出错时放行，不能卡住用户
-        print(f"[project-hygiene] hook 内部错误，已放行：{e}", file=sys.stderr)
+        print(f"[tidy] hook 内部错误，已放行：{e}", file=sys.stderr)
         return 0
 
 

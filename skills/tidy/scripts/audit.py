@@ -5,7 +5,7 @@
 
 用法:
     python3 audit.py [项目路径] [--format text|json] [--fail-on error|warn|never]
-    python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .claude/hygiene.json 草稿
+    python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .claude/tidy.json 草稿
     python3 audit.py [项目路径] --fix-gitignore   # 把未忽略的依赖 / 生成物 / 垃圾 / 密钥文件补进 .gitignore
 """
 
@@ -227,7 +227,7 @@ def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
 
 
 def init_config(root: Path) -> Path:
-    """按现有顶层目录生成 .claude/hygiene.json 草稿。已存在时不覆盖。"""
+    """按现有顶层目录生成 .claude/tidy.json 草稿。已存在时不覆盖。"""
     target = root / CONFIG_PATH
     if target.exists():
         raise FileExistsError(target)
@@ -267,7 +267,7 @@ def fix_gitignore(root: Path, findings: list[Finding]) -> list[str]:
         with open(gi, "a", encoding="utf-8") as fh:
             if existing and existing[-1].strip():
                 fh.write("\n")
-            fh.write("# added by project-hygiene\n" + "\n".join(new) + "\n")
+            fh.write("# added by tidy\n" + "\n".join(new) + "\n")
     return new
 
 
