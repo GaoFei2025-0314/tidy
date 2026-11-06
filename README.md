@@ -22,7 +22,7 @@ tools/  voice/                               ← 没人说得清这些目录是�
 | **Hooks（自动执行）** | ① 会话开始：把规则和目录约定注入给 AI<br>② AI 新建文件前：名字或位置不合规就**拦截**，并告诉它正确做法<br>③ 每轮结束：检查本轮**新增**的文件（包括用 Bash 创建的），有问题就要求先清理再结束 |
 | **Skill + 脚本** | 判断标准与整理流程；`audit.py` 全面审计、`refs.py` 查引用、`--fix-gitignore` 自动修复、`--init` 生成目录约定；`/tidy` 一键整理 |
 
-Hooks 只追究**新增**的文件，老项目里已有的问题不会每轮反复提醒——那些用 `/tidy` 一次性整理。
+Hooks 只追究**新增**的文件（包括本轮 `git add` / commit 过的），老项目里已有的问题不会每轮反复提醒——那些用 `/tidy` 一次性整理。核实过、确认没问题的告警可以用 `--review` 记下来，文件不变就不再报告。
 
 ## 实际效果
 
@@ -97,6 +97,9 @@ cp -r skills/tidy ~/.claude/skills/
 ```bash
 S=skills/tidy/scripts
 python3 $S/audit.py <项目>                    # 审计报告（同类问题多时折叠，--all 展开）
+python3 $S/audit.py <项目> --changed          # 只看相对 HEAD 新增 / 修改的文件（交付前用）
+python3 $S/audit.py <项目> --since 2h         # 只看 2 小时内修改的文件（非 git 项目也能用）
+python3 $S/audit.py <项目> --review duplicate-file docs/pack/belt.jpg --reason "课包需要独立图片"   # 记录已核实的告警
 python3 $S/audit.py <项目> --fail-on error    # CI 中使用，有 error 时退出码 1
 python3 $S/audit.py <项目> --init             # 生成 .claude/tidy.json 草稿
 python3 $S/audit.py <项目> --fix-gitignore    # 把应忽略的内容补进 .gitignore（只追加）
@@ -140,7 +143,7 @@ python3 $S/refs.py  <项目> src/Root_old.tsx   # 这个文件被谁引用？
 | `undeclared-dir` | warn | 文件放在目录约定之外的顶层目录 | ✅ |
 | `junk-file` | warn | `.DS_Store`、`*.log`、`*.bak` 等 | ✅ |
 | `multiple-lockfiles` / `root-clutter` / `large-file` | warn | 多个 lockfile / 根目录文件过多 / 大文件 | |
-| `duplicate-file` / `empty-file` / `empty-dir` | info | 重复（同目录多组合并为一条）、空文件、空目录（只含被忽略文件的不算） | |
+| `duplicate-file` / `empty-file` / `empty-dir` | info | 重复（同目录多组合并为一条，跨顶层目录的标为可能的交付副本）、空文件、空目录（只含被忽略文件的不算） | |
 | `mixed-naming` | info | 同目录同类文件混用 kebab-case 和 snake_case | |
 | `readme-missing-dir` / `layout-missing-dir` / `no-layout` | info | README 或目录约定与实际目录不一致 / 缺少目录约定 | |
 | `deep-nesting` / `not-git-repo` | info / warn | 层级过深 / 不是 git 仓库 | |

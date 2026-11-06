@@ -46,12 +46,15 @@ def state_file(root: Path, session_id: str) -> Path:
     return d / f"{session_id or 'default'}.json"
 
 
-def snapshot(root: Path, proj: Project) -> set[str]:
-    """当前"未跟踪且未忽略"的文件集合（非 git 项目则为全部未忽略文件）。
+def snapshot(root: Path, proj: Project, base: str = "") -> set[str]:
+    """当前"未跟踪且未忽略"的文件，加上相对会话开始时的 commit（base）新增并已 git add / commit 的文件。
 
-    依赖 / 生成物目录折叠成一个条目，避免 node_modules 之类刷屏。
+    非 git 项目则为全部未忽略文件。依赖 / 生成物目录折叠成一个条目，避免 node_modules 之类刷屏。
     """
-    files = proj.untracked() if proj.is_git else list(iter_files(root, proj))
+    if proj.is_git:
+        files = proj.untracked() + (proj.added_since(base) if base else [])
+    else:
+        files = list(iter_files(root, proj))
     result = set()
     for rel in files:
         result.add(artifact_dir_of(rel, root) or rel)
@@ -63,15 +66,19 @@ def snapshot(root: Path, proj: Project) -> set[str]:
     return result
 
 
-def save(path: Path, files: set[str]) -> None:
-    path.write_text(json.dumps(sorted(files), ensure_ascii=False), encoding="utf-8")
+def save(path: Path, files: set[str], base: str) -> None:
+    path.write_text(json.dumps({"base": base, "files": sorted(files)}, ensure_ascii=False), encoding="utf-8")
 
 
-def load(path: Path) -> set[str] | None:
+def load(path: Path) -> tuple[set[str], str] | None:
+    """返回（基线文件集合, 会话开始时的 commit）。兼容旧版只存列表的状态文件。"""
     try:
-        return set(json.loads(path.read_text(encoding="utf-8")))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if isinstance(data, list):
+        return set(data), ""
+    return set(data.get("files", [])), data.get("base", "")
 
 
 def format_findings(findings: list[Finding]) -> str:
@@ -111,7 +118,8 @@ def check_new_entries(new: set[str], cfg: Config) -> list[Finding]:
 
 def on_session_start(data: dict, root: Path, cfg: Config) -> int:
     proj = Project(root)
-    save(state_file(root, data.get("session_id", "")), snapshot(root, proj))
+    base = proj.head() if proj.is_git else ""
+    save(state_file(root, data.get("session_id", "")), snapshot(root, proj, base), base)
     out = [CORE_RULES]
     if cfg.error:
         out.append(f"注意：{cfg.error}。请修正该文件。")
@@ -161,15 +169,21 @@ def on_pre_write(data: dict, root: Path, cfg: Config) -> int:
 def on_stop(data: dict, root: Path, cfg: Config) -> int:
     proj = Project(root)
     sf = state_file(root, data.get("session_id", ""))
-    current = snapshot(root, proj)
-    baseline = load(sf)
-    if baseline is None or data.get("stop_hook_active"):
-        # 没有基线（会话中途装的插件）或已经提醒过一次：接受当前状态，避免死循环
-        save(sf, current)
+    state = load(sf)
+    if state is None or (proj.is_git and not state[1]):
+        # 没有基线（会话中途装的插件，或旧版状态文件）：以当前状态为基线
+        base = proj.head() if proj.is_git else ""
+        save(sf, snapshot(root, proj, base), base)
+        return 0
+    baseline, base = state
+    current = snapshot(root, proj, base)
+    if data.get("stop_hook_active"):
+        # 已经提醒过一次：接受当前状态，避免死循环
+        save(sf, current, base)
         return 0
     findings = check_new_entries(current - baseline, cfg)
     if not findings:
-        save(sf, current)
+        save(sf, current, base)
         return 0
     print(
         "[tidy] 结束前检查：本轮新增的文件有不符合整洁规范的地方，请先处理：\n"

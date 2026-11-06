@@ -121,6 +121,7 @@ class Config:
     # 豁免：{"*": [对所有规则], "规则 id": [只对该规则]}；也接受旧格式的 glob 列表（等同 "*"）
     allow: dict[str, list[str]] | list[str] = field(default_factory=dict)
     keep_local: dict[str, str] = field(default_factory=dict)  # 本地保留、不进 git 的 glob → 原因
+    reviewed: list[dict] = field(default_factory=list)        # 已人工核实的告警：{rule, path, reason, sig}
     root_allow: list[str] = field(default_factory=list)     # 额外允许放在根目录的文件 glob
     disable: list[str] = field(default_factory=list)        # 关闭的规则 id
     large_file_mb: float = 5.0
@@ -158,6 +159,11 @@ def load_config(root: Path) -> Config:
             keep = {str(g): "" for g in keep}
         elif not isinstance(keep, dict):
             raise ValueError("keepLocal 必须是 glob 列表或 {glob: 原因}")
+        reviewed = data.get("reviewed", [])
+        if not isinstance(reviewed, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("rule"), str) and isinstance(r.get("path"), str)
+                for r in reviewed):
+            raise ValueError("reviewed 必须是 [{rule, path, reason, sig}] 列表")
         layout = data.get("layout", {})
         if not isinstance(layout, dict):
             raise ValueError("layout 必须是 {目录: 说明}")
@@ -165,6 +171,7 @@ def load_config(root: Path) -> Config:
             layout={str(k): str(v) for k, v in layout.items()},
             allow=allow,
             keep_local={str(k): str(v) for k, v in keep.items()},
+            reviewed=reviewed,
             root_allow=_str_list(data.get("rootAllow", []), "rootAllow"),
             disable=_str_list(data.get("disable", []), "disable"),
             large_file_mb=float(data.get("largeFileMB", 5.0)),
@@ -353,6 +360,21 @@ class Project:
         except (subprocess.CalledProcessError, FileNotFoundError):
             return []
         return [p for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+
+    EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+    def head(self) -> str:
+        """当前 HEAD 的 commit；空仓库返回空树，便于和 git diff 配合。"""
+        return self._git(["rev-parse", "--verify", "-q", "HEAD"]) or self.EMPTY_TREE
+
+    def added_since(self, base: str) -> list[str]:
+        """相对 base 新增、且已进入暂存区或已提交的文件（git add / git commit 之后不再是"未跟踪"）。"""
+        return self._git_z(["diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A", base])
+
+    def changed_since(self, base: str) -> list[str]:
+        """相对 base 新增或修改的文件（含暂存区和工作区），加上未跟踪文件。"""
+        changed = self._git_z(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM", base])
+        return sorted(set(changed) | set(self.untracked()))
 
     def untracked(self) -> list[str]:
         """未跟踪且未被忽略的文件（仅 git 项目）。"""

@@ -5,6 +5,9 @@
 
 用法:
     python3 audit.py [项目路径] [--format text|json] [--fail-on error|warn|never] [--all]
+    python3 audit.py [项目路径] --changed [REF]     # 只报告相对 REF（默认 HEAD）新增 / 修改的文件，git 项目
+    python3 audit.py [项目路径] --since 2h         # 只报告最近修改的文件（按修改时间，非 git 项目也可用）
+    python3 audit.py [项目路径] --review 规则 路径 --reason 原因   # 记录一条已核实的告警，文件变化前不再报告
     python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .claude/tidy.json 草稿
     python3 audit.py [项目路径] --fix-gitignore   # 把未忽略的依赖 / 生成物 / 垃圾 / 密钥文件补进 .gitignore
 """
@@ -17,15 +20,17 @@ import json
 import os
 import re
 import sys
+import time
 from collections import defaultdict
+from datetime import datetime
 from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rules import (  # noqa: E402
     CONFIG_PATH, DEPENDENCY_DIRS, JUNK_FILE_GLOBS, KNOWN_DIR_PURPOSES, LOCKFILES, OUTPUT_DIRS, SEVERITY_ORDER,
-    SKIP_DIRS, Config, Finding, Project, apply_config, check_path, is_dependency_dir, is_exempt, is_output_dir,
-    keep_local_match, load_config, matches_any,
+    SECRET_RULES, SKIP_DIRS, Config, Finding, Project, apply_config, check_path, is_dependency_dir, is_exempt,
+    is_output_dir, iter_files, keep_local_match, load_config, matches_any,
 )
 
 EMPTY_OK = {"__init__.py", "py.typed", ".gitkeep", ".keep", ".nojekyll"}
@@ -205,14 +210,21 @@ def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
             buckets[dirs].append(sorted(paths))
     for dirs, groups in buckets.items():
         groups.sort()
+        tops = sorted({d.split("/")[0] for d in dirs})
+        if len(tops) > 1:
+            # 跨顶层目录的副本（src/ 素材与 docs/ 课包、public/ 与交付目录）常是有意的交付副本
+            kind = f"跨目录副本（{'、'.join(t + '/' for t in tops)}），可能是交付副本"
+            hint = ("确认交付物是否需要独立副本：需要就保留，并用 audit.py --review duplicate-file <路径> --reason 记录；"
+                    "不需要就保留一份并修正引用")
+        else:
+            kind = "内容完全相同的文件"
+            hint = "保留一份并修正引用；连续截帧等预期重复可在 allow 中按 duplicate-file 豁免该目录"
         if len(groups) == 1:
-            add(Finding("duplicate-file", "info", groups[0][0], f"内容完全相同的文件：{', '.join(groups[0])}",
-                        "保留一份并修正引用；交付副本或预期重复可在 allow 中按 duplicate-file 豁免"))
+            add(Finding("duplicate-file", "info", groups[0][0], f"{kind}：{', '.join(groups[0])}", hint))
         else:
             sample = "；".join(", ".join(g) for g in groups[:2])
             add(Finding("duplicate-file", "info", dirs[0] + "/",
-                        f"{'、'.join(d + '/' for d in dirs)} 中有 {len(groups)} 组内容完全相同的文件，例如：{sample}",
-                        "保留一份并修正引用；连续截帧等预期重复可在 allow 中按 duplicate-file 豁免该目录"))
+                        f"{'、'.join(d + '/' for d in dirs)} 中有 {len(groups)} 组{kind}，例如：{sample}", hint))
 
     # ---------- 命名风格混用 ----------
     for (d, ext), styles in by_dir_style.items():
@@ -242,6 +254,7 @@ def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
         if (f.rule, f.path) not in seen:
             seen.add((f.rule, f.path))
             unique.append(f)
+    unique, reviewed_count = apply_reviewed(root, unique, cfg)
     unique.sort(key=lambda x: (SEVERITY_ORDER[x.severity], x.rule, x.path))
     summary = {
         "root": str(root),
@@ -250,9 +263,112 @@ def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
         "scanned_files": stats["files"],
         "scanned_dirs": stats["dirs"],
         "skipped_dirs": stats["skipped_dirs"],
+        "reviewed": reviewed_count,
         "counts": {s: sum(1 for f in unique if f.severity == s) for s in SEVERITY_ORDER},
     }
     return unique, summary
+
+
+def signature(root: Path, rel: str) -> str:
+    """告警对象的内容指纹：文件取内容哈希，目录取直接子项的名字和大小。变化后已核实记录失效。"""
+    if rel in (".", ""):
+        return ""
+    p = root / rel.rstrip("/")
+    h = hashlib.sha1()
+    try:
+        if p.is_dir():
+            for c in sorted(p.iterdir()):
+                h.update(f"{c.name}:{c.stat().st_size if c.is_file() else 'd'}\n".encode())
+        elif p.is_file():
+            with open(p, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        else:
+            return "missing"
+    except OSError:
+        return "missing"
+    return h.hexdigest()[:12]
+
+
+def apply_reviewed(root: Path, findings: list[Finding], cfg: Config) -> tuple[list[Finding], int]:
+    """跳过已核实且内容未变的告警；内容变了的保留并提示复核。密钥类告警不能被跳过。"""
+    if not cfg.reviewed:
+        return findings, 0
+    index = {(r["rule"], r["path"]): r for r in cfg.reviewed}
+    out, skipped = [], 0
+    for f in findings:
+        r = index.get((f.rule, f.path))
+        if r is None or f.rule in SECRET_RULES:
+            out.append(f)
+        elif r.get("sig", "") == signature(root, f.path):
+            skipped += 1
+        else:
+            f.message += f"（之前已核实：{r.get('reason', '')}；内容已变化，请复核）"
+            out.append(f)
+    return out, skipped
+
+
+def add_review(root: Path, rule: str, path: str, reason: str) -> str:
+    """把一条当前存在的告警记为已核实，写入 tidy.json 的 reviewed。返回错误信息，成功返回空串。"""
+    cfg = load_config(root)
+    if cfg.error:
+        return cfg.error
+    if rule in SECRET_RULES:
+        return "密钥类告警不能记为已核实，请忽略或移除该文件"
+    if not reason.strip():
+        return "请用 --reason 写明核实结论"
+    findings, _ = audit(root, Config(**{**cfg.__dict__, "reviewed": []}))
+    if not any(f.rule == rule and f.path == path for f in findings):
+        return f"当前审计结果里没有 [{rule}] {path}，请从报告中复制规则 id 和路径"
+    target = root / CONFIG_PATH
+    data = json.loads(target.read_text(encoding="utf-8")) if target.is_file() else {}
+    entries = [r for r in data.get("reviewed", []) if (r.get("rule"), r.get("path")) != (rule, path)]
+    entries.append({"rule": rule, "path": path, "reason": reason.strip(), "sig": signature(root, path)})
+    data["reviewed"] = entries
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return ""
+
+
+def parse_since(value: str) -> float:
+    """'30m'、'2h'、'1d' 或 ISO 时间 → 时间戳。"""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([mhd])", value.strip())
+    if m:
+        return time.time() - float(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return datetime.fromisoformat(value.strip()).timestamp()
+
+
+def changed_by_mtime(root: Path, since: float) -> set[str]:
+    proj = Project(root)
+    out = set()
+    for rel in iter_files(root, proj):
+        try:
+            if (root / rel).stat().st_mtime >= since:
+                out.add(rel)
+        except OSError:
+            pass
+    return out
+
+
+def limit_to_changed(root: Path, findings: list[Finding], changed: set[str], since: float | None = None) -> list[Finding]:
+    """只保留和本次变化有关的告警。密钥类、配置错误和仓库级 error 始终保留。"""
+    def touches(f: Finding) -> bool:
+        if f.rule in SECRET_RULES or f.rule == "config-invalid" or (f.path == "." and f.severity == "error"):
+            return True
+        if f.path in changed:
+            return True
+        if f.path.endswith("/"):
+            if any(c.startswith(f.path) for c in changed):
+                return True
+            if since is not None:
+                try:
+                    return (root / f.path).stat().st_mtime >= since
+                except OSError:
+                    return False
+        if f.rule == "duplicate-file":
+            return any(c in f.message for c in changed)
+        return False
+    return [f for f in findings if touches(f)]
 
 
 def init_config(root: Path) -> Path:
@@ -313,6 +429,10 @@ def render_text(findings: list[Finding], summary: dict, show_all: bool = False) 
         f"（跳过已忽略 / 依赖目录 {summary['skipped_dirs']} 个）",
         "",
     ]
+    if summary.get("scope"):
+        lines.insert(2, f"范围：{summary['scope']}")
+    if summary.get("reviewed"):
+        lines.insert(2, f"已核实且未变化的告警 {summary['reviewed']} 条已跳过（见 {CONFIG_PATH} 的 reviewed）")
     if not findings:
         lines.append("没有发现问题。")
         return "\n".join(lines)
@@ -342,6 +462,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fail-on", choices=["error", "warn", "never"], default="never",
                     help="达到该级别时以非零状态退出（用于 CI）")
     ap.add_argument("--all", action="store_true", help="文本报告不折叠同类问题")
+    ap.add_argument("--changed", nargs="?", const="HEAD", metavar="REF",
+                    help="只报告相对 REF（默认 HEAD）新增 / 修改的文件（git 项目）")
+    ap.add_argument("--since", metavar="TIME", help="只报告最近修改的文件：30m、2h、1d 或 ISO 时间")
+    ap.add_argument("--review", nargs=2, metavar=("RULE", "PATH"), help="把一条告警记为已核实")
+    ap.add_argument("--reason", default="", help="配合 --review：核实结论")
     ap.add_argument("--init", action="store_true", help=f"生成 {CONFIG_PATH} 草稿")
     ap.add_argument("--fix-gitignore", action="store_true", help="把应忽略的文件补进 .gitignore")
     args = ap.parse_args(argv)
@@ -360,7 +485,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"已生成 {target}，请补全每个目录的用途（TODO 项），并同步 README「目录结构」。")
         return 0
 
+    if args.review:
+        err = add_review(root, args.review[0], args.review[1], args.reason)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        print(f"已记录到 {CONFIG_PATH} 的 reviewed：[{args.review[0]}] {args.review[1]}。该对象内容变化后会重新报告。")
+        return 0
+
     findings, summary = audit(root)
+    if args.changed or args.since:
+        if args.since:
+            try:
+                since = parse_since(args.since)
+            except ValueError:
+                print(f"无法解析时间：{args.since}（用 30m、2h、1d 或 ISO 时间）", file=sys.stderr)
+                return 2
+            changed, summary["scope"] = changed_by_mtime(root, since), f"{args.since} 内修改的文件"
+        else:
+            proj = Project(root)
+            if not proj.is_git:
+                print("--changed 需要 git 仓库；非 git 项目请用 --since", file=sys.stderr)
+                return 2
+            since = None
+            changed, summary["scope"] = set(proj.changed_since(args.changed)), f"相对 {args.changed} 的变化"
+        findings = limit_to_changed(root, findings, changed, since)
+        summary["counts"] = {s: sum(1 for f in findings if f.severity == s) for s in SEVERITY_ORDER}
+        summary["scope"] += f"（{len(changed)} 个文件）"
     if args.fix_gitignore:
         added = fix_gitignore(root, findings)
         if added:

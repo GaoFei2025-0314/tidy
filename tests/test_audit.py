@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -265,6 +266,29 @@ class HookTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("keepLocal", err)
 
+    def test_stop_catches_files_after_git_add_and_commit(self):
+        self.hook("session-start")
+        write(self.root, "debug.py")
+        subprocess.run(["git", "add", "debug.py"], cwd=self.root, check=True)
+        code, _, err = self.hook("stop", stop_hook_active=False)
+        self.assertEqual(code, 2)
+        self.assertIn("debug.py", err)
+        self.hook("stop", stop_hook_active=True)  # 接受
+        write(self.root, "src/notes_old.md")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"],
+                       cwd=self.root, check=True)
+        code, _, err = self.hook("stop", stop_hook_active=False)
+        self.assertEqual(code, 2)
+        self.assertIn("notes_old.md", err)
+        self.assertNotIn("debug.py", err)
+
+    def test_stop_accepts_legacy_state_file(self):
+        from hook import state_file  # noqa: E402
+        sf = state_file(self.root.resolve(), self.session)
+        sf.write_text("[]", encoding="utf-8")
+        self.assertEqual(self.hook("stop", stop_hook_active=False)[0], 0)  # 旧格式：重建基线，不误报
+
     def test_hooks_can_be_disabled(self):
         write(self.root, ".claude/tidy.json", json.dumps({"hooks": False}))
         self.assertEqual(self.write_hook("FIX_REPORT.md")[0], 0)
@@ -411,6 +435,76 @@ class RegressionTest(unittest.TestCase):
             findings, _ = audit.audit(root)
             self.assertNotIn("keep-local-not-ignored", {f.rule for f in findings})
             self.assertTrue((root / "voice/L01/b.wav").exists())
+
+
+class WorkflowTest(unittest.TestCase):
+    """日常使用：只看本次变化、记录已核实的告警、交付副本。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = root = Path(self._tmp.name)
+        write(root, "README.md", "# demo\n- src/\n- docs/\n")
+        write(root, ".gitignore", "node_modules/\n")
+        write(root, ".claude/tidy.json", json.dumps(LAYOUT))
+        write(root, "src/old_v2.ts")
+        write(root, "src/plates/belt.jpg", "j" * 200)
+        write(root, "docs/pack/belt.jpg", "j" * 200)
+        git_commit_all(root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_json(self, *args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = audit.main([str(self.root), "--format", "json", *args])
+        return code, json.loads(buf.getvalue())
+
+    def test_changed_only_reports_new_problems(self):
+        write(self.root, "src/new_v2.ts")
+        _, data = self.run_json("--changed")
+        paths = {f["path"] for f in data["findings"]}
+        self.assertIn("src/new_v2.ts", paths)
+        self.assertNotIn("src/old_v2.ts", paths)
+        _, full = self.run_json()
+        self.assertIn("src/old_v2.ts", {f["path"] for f in full["findings"]})
+
+    def test_since_uses_mtime(self):
+        import os
+        old = time.time() - 3 * 86400
+        for p in self.root.rglob("*"):
+            if p.is_file() and ".git" not in p.parts:
+                os.utime(p, (old, old))
+        write(self.root, "src/fresh_v2.ts")
+        _, data = self.run_json("--since", "1h")
+        self.assertEqual({f["path"] for f in data["findings"]}, {"src/fresh_v2.ts"})
+
+    def test_cross_dir_duplicate_labelled_as_delivery_copy(self):
+        dup = [f for f in audit.audit(self.root)[0] if f.rule == "duplicate-file"]
+        self.assertEqual(len(dup), 1)
+        self.assertIn("交付副本", dup[0].message)
+
+    def test_review_lifecycle(self):
+        quiet = contextlib.redirect_stderr(io.StringIO())
+        with quiet, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(audit.main([str(self.root), "--review", "version-suffix", "src/old_v2.ts"]), 1)  # 缺原因
+            self.assertEqual(audit.main([str(self.root), "--review", "version-suffix", "src/nope.ts",
+                                         "--reason", "x"]), 1)  # 没有这条告警
+            self.assertEqual(audit.main([str(self.root), "--review", "version-suffix", "src/old_v2.ts",
+                                         "--reason", "第三方 SDK 的文件名"]), 0)
+        cfg = json.loads((self.root / ".claude/tidy.json").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["layout"], LAYOUT["layout"])  # 原有配置保留
+        findings, summary = audit.audit(self.root)
+        self.assertNotIn("src/old_v2.ts", {f.path for f in findings})
+        self.assertEqual(summary["reviewed"], 1)
+        write(self.root, "src/old_v2.ts", "changed" * 20)
+        findings, _ = audit.audit(self.root)
+        f = [x for x in findings if x.path == "src/old_v2.ts"]
+        self.assertTrue(f and "请复核" in f[0].message)
+
+    def test_review_cannot_hide_secrets(self):
+        write(self.root, "src/.env", "K=1")
+        self.assertIn("密钥", audit.add_review(self.root, "secret-not-ignored", "src/.env", "x"))
 
 
 class NonGitIgnoreTest(unittest.TestCase):
