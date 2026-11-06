@@ -248,6 +248,23 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.hook("stop", stop_hook_active=True)[0], 0)
         self.assertEqual(self.hook("stop", stop_hook_active=False)[0], 0)  # 已接受，不再重复提醒
 
+    def test_pre_write_checks_nested_output_name(self):
+        self.assertEqual(self.write_hook("docs/coverage/notes_v2.md")[0], 2)
+
+    def test_session_start_reports_bad_config_and_keep_local(self):
+        write(self.root, ".claude/tidy.json", "{bad")
+        self.assertIn("无法解析", self.hook("session-start")[1])
+        write(self.root, ".claude/tidy.json", json.dumps({**LAYOUT, "keepLocal": {"out/**": "成片"}}))
+        self.assertIn("out/** — 成片", self.hook("session-start")[1])
+
+    def test_stop_flags_keep_local_not_ignored(self):
+        write(self.root, ".claude/tidy.json", json.dumps({**LAYOUT, "keepLocal": ["src/media/*.wav"]}))
+        self.hook("session-start")
+        write(self.root, "src/media/a.wav")
+        code, _, err = self.hook("stop", stop_hook_active=False)
+        self.assertEqual(code, 2)
+        self.assertIn("keepLocal", err)
+
     def test_hooks_can_be_disabled(self):
         write(self.root, ".claude/tidy.json", json.dumps({"hooks": False}))
         self.assertEqual(self.write_hook("FIX_REPORT.md")[0], 0)
@@ -266,6 +283,150 @@ class NonGitTest(unittest.TestCase):
             self.assertFalse(summary["git"])
             self.assertIn(("not-git-repo", "."), {(f.rule, f.path) for f in findings})
             self.assertFalse(any(f.path.startswith(("node_modules", "out", "logs/run.log")) for f in findings))
+
+
+
+class RegressionTest(unittest.TestCase):
+    """真实项目（课程视频）里暴露出的误报和漏洞。"""
+
+    def rules(self, rel, cfg=None):
+        return {f.rule for f in rules.check_path(rel, cfg or rules.Config())}
+
+    def test_allow_never_exempts_secrets(self):
+        cfg = rules.Config(allow={"*": ["config/**"], "secret-file": ["config/**"]})
+        self.assertIn("secret-file", self.rules("config/.env", cfg))
+        self.assertEqual(self.rules("config/notes_v2.md", cfg), set())
+
+    def test_copy_means_copywriting(self):
+        for rel in ["src/additional-copy.ts", "docs/hero_copy.md"]:
+            self.assertNotIn("version-suffix", self.rules(rel), rel)
+        for rel in ["docs/intro copy.md", "docs/intro copy 2.md", "src/Title_copy2.tsx"]:
+            self.assertIn("version-suffix", self.rules(rel), rel)
+
+    def test_scratch_prefix_only_at_root(self):
+        self.assertIn("scratch-file", self.rules("check_render.py"))
+        self.assertNotIn("scratch-file", self.rules("tools/check_language.py"))
+        self.assertIn("scratch-file", self.rules("tools/debug.py"))
+
+    def test_per_rule_allow(self):
+        cfg = rules.Config(allow={"non-portable-name": ["docs/课程/**"]})
+        self.assertEqual(self.rules("docs/课程/L01/讲义.md", cfg), set())
+        self.assertIn("non-portable-name", self.rules("tools/生成.py", cfg))
+        self.assertIn("version-suffix", self.rules("docs/课程/讲义_v2.md", cfg))
+        self.assertEqual(self.rules("docs/a/b_old.md", rules.Config(allow=["docs/a"])), set())  # 旧格式
+
+    def test_nested_output_dir_name_is_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n- docs/\n- packages/\n")
+            write(root, ".gitignore", "node_modules/\n")
+            write(root, "docs/L12/coverage/report.md")
+            write(root, "packages/web/package.json", "{}")
+            write(root, "packages/web/dist/a.js")
+            git_commit_all(root)
+            self.assertIsNone(rules.artifact_dir_of("docs/L12/coverage/report.md", root))
+            self.assertEqual(rules.artifact_dir_of("packages/web/dist/a.js", root), "packages/web/dist/")
+            findings, _ = audit.audit(root)
+            self.assertFalse(any(f.path.startswith("docs/L12") and f.rule.endswith("artifact") for f in findings))
+            self.assertIn("tracked-artifact", rules_for(findings, "packages/web/dist/"))
+
+    def test_invalid_config_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, ".claude/tidy.json", '{"layout": {"src/": "x"},}')
+            cfg = rules.load_config(root)
+            self.assertTrue(cfg.error)
+            findings, _ = audit.audit(root)
+            self.assertIn("config-invalid", {f.rule for f in findings})
+            write(root, ".claude/tidy.json", '{"allow": "docs/*"}')
+            self.assertTrue(rules.load_config(root).error)
+
+    def test_refs_skips_secret_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "src/intro.ts")
+            write(root, ".env", "INTRO_TOKEN=intro.ts-secret-value")
+            res = refs.find_refs(root, ["src/intro.ts"])
+            self.assertEqual(res["src/intro.ts"]["verdict"], "unreferenced")
+            self.assertNotIn("secret-value", json.dumps(res))
+
+    def test_empty_dir_vs_local_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n- docs/\n")
+            write(root, ".gitignore", "*.png\n")
+            write(root, "docs/L01/figures/a.png")
+            (root / "docs/L02/figures").mkdir(parents=True)
+            write(root, "docs/L01/notes.md")
+            git_commit_all(root)
+            findings, _ = audit.audit(root)
+            empty = {f.path for f in findings if f.rule == "empty-dir"}
+            self.assertEqual(empty, {"docs/L02/figures/"})
+
+    def test_duplicates_grouped_and_exemptible(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n- frames/\n- src/\n")
+            write(root, ".gitignore", "x\n")
+            for i in range(4):
+                write(root, f"frames/{i}a.jpg", str(i) * 100)
+                write(root, f"frames/{i}b.jpg", str(i) * 100)
+            write(root, "src/a.txt", "q" * 100)
+            write(root, "src/b.txt", "q" * 100)
+            git_commit_all(root)
+            dup = [f for f in audit.audit(root)[0] if f.rule == "duplicate-file"]
+            self.assertEqual(len(dup), 2)
+            self.assertIn("frames/", {f.path for f in dup})
+            cfg = rules.Config(allow={"duplicate-file": ["frames/**"]})
+            dup = [f for f in audit.audit(root, cfg)[0] if f.rule == "duplicate-file"]
+            self.assertEqual([f.path for f in dup], ["src/a.txt"])
+
+    def test_text_report_folds_long_rules(self):
+        fs = [rules.Finding("empty-dir", "info", f"d{i}/", "空目录", "删") for i in range(20)]
+        summary = {"root": ".", "git": True, "config": True, "scanned_files": 0, "scanned_dirs": 0,
+                   "skipped_dirs": 0, "counts": {"error": 0, "warn": 0, "info": 20}}
+        text = audit.render_text(fs, summary)
+        self.assertIn("另有 15 条", text)
+        self.assertNotIn("d19/", text)
+        self.assertIn("d19/", audit.render_text(fs, summary, show_all=True))
+
+    def test_keep_local(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n- voice/\n")
+            write(root, ".gitignore", "node_modules/\n")
+            write(root, ".claude/tidy.json", json.dumps(
+                {"layout": {"voice/": "配音"}, "keepLocal": {"voice/**/*.wav": "已验收配音母带，重配成本高"}}))
+            write(root, "voice/L01/a.wav")
+            write(root, "voice/L01/b.wav")
+            write(root, "voice/L01/script.md")
+            git_commit_all(root)
+            subprocess.run(["git", "rm", "-q", "--cached", "voice/L01/b.wav"], cwd=root, check=True)
+            findings, _ = audit.audit(root)
+            self.assertIn("keep-local-tracked", rules_for(findings, "voice/L01/a.wav"))
+            self.assertIn("keep-local-not-ignored", rules_for(findings, "voice/L01/b.wav"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.main([str(root), "--fix-gitignore"])
+            self.assertIn("voice/**/*.wav", (root / ".gitignore").read_text(encoding="utf-8"))
+            findings, _ = audit.audit(root)
+            self.assertNotIn("keep-local-not-ignored", {f.rule for f in findings})
+            self.assertTrue((root / "voice/L01/b.wav").exists())
+
+
+class NonGitIgnoreTest(unittest.TestCase):
+    def test_negation_and_double_star(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, ".gitignore", ".env*\n!.env.example\nvoice/**/*.mp3\n/out/\n")
+            proj = rules.Project(root)
+            self.assertFalse(proj.is_git)
+            self.assertTrue(proj.is_ignored(".env", False))
+            self.assertFalse(proj.is_ignored(".env.example", False))
+            self.assertTrue(proj.is_ignored("voice/a.mp3", False))
+            self.assertTrue(proj.is_ignored("voice/L1/a.mp3", False))
+            self.assertFalse(proj.is_ignored("voice/a.wav", False))
+            self.assertTrue(proj.is_ignored("out/x/y.mp4", False))
+            self.assertFalse(proj.is_ignored("src/out/y.mp4", False))
 
 
 if __name__ == "__main__":

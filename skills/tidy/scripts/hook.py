@@ -23,7 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rules import (  # noqa: E402
-    CONFIG_PATH, Config, Finding, Project, apply_config, artifact_dir_of, check_path, iter_files, load_config,
+    CONFIG_PATH, Config, Finding, Project, apply_config, artifact_dir_of, check_path, iter_files, keep_local_match,
+    load_config,
 )
 
 CORE_RULES = """\
@@ -53,7 +54,7 @@ def snapshot(root: Path, proj: Project) -> set[str]:
     files = proj.untracked() if proj.is_git else list(iter_files(root, proj))
     result = set()
     for rel in files:
-        result.add(artifact_dir_of(rel) or rel)
+        result.add(artifact_dir_of(rel, root) or rel)
     if not proj.is_git:
         # iter_files 不进入依赖 / 生成物目录，单独记录它们是否存在
         for p in root.iterdir():
@@ -85,6 +86,12 @@ def format_findings(findings: list[Finding]) -> str:
 def check_new_entries(new: set[str], cfg: Config) -> list[Finding]:
     findings: list[Finding] = []
     for rel in sorted(new):
+        glob = keep_local_match(rel, cfg)
+        if glob:  # 快照里只有未忽略的文件，所以匹配 keepLocal 就说明漏了忽略规则
+            findings.append(Finding("keep-local-not-ignored", "warn", rel,
+                                    f"按 keepLocal（{glob}）应本地保留、不进 git，但未被忽略",
+                                    "把该 glob 加进 .gitignore（可用 audit.py --fix-gitignore）；不要删除文件"))
+            continue
         if rel.endswith("/"):
             findings.append(Finding("artifact-not-ignored", "warn", rel, "新出现的依赖 / 生成物目录未被忽略",
                                     "加入 .gitignore；如果它确实是源码目录，在 .claude/tidy.json 的 allow 中豁免"))
@@ -106,11 +113,16 @@ def on_session_start(data: dict, root: Path, cfg: Config) -> int:
     proj = Project(root)
     save(state_file(root, data.get("session_id", "")), snapshot(root, proj))
     out = [CORE_RULES]
+    if cfg.error:
+        out.append(f"注意：{cfg.error}。请修正该文件。")
     if cfg.layout:
         out.append(f"本项目目录约定（{CONFIG_PATH}）——新文件必须放进这些目录，确需新目录先登记：")
         out += [f"  {k.rstrip('/')}/ — {v}" for k, v in cfg.layout.items()]
     else:
         out.append(f"本项目尚未声明目录约定（{CONFIG_PATH}）。用户要求整理项目时，使用 tidy skill。")
+    if cfg.keep_local:
+        out.append("本地保留、不进 git 的文件（不要当作生成物删除）：")
+        out += [f"  {g}" + (f" — {why}" if why else "") for g, why in cfg.keep_local.items()]
     print("\n".join(out))
     return 0
 
@@ -129,7 +141,7 @@ def on_pre_write(data: dict, root: Path, cfg: Config) -> int:
         rel = path.relative_to(root).as_posix()
     except ValueError:  # 项目外（如系统临时目录）不管
         return 0
-    if artifact_dir_of(rel):
+    if artifact_dir_of(rel, root):
         return 0
     proj = Project(root)
     if proj.check_ignore(rel):  # 写进已忽略的位置（临时区、生成物目录）不管

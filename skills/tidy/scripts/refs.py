@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rules import Project, iter_files  # noqa: E402
+from rules import SECRET_ALLOW, SECRET_FILE_GLOBS, Project, iter_files, matches_any  # noqa: E402
 
 MAX_BYTES = 1024 * 1024
 STRIP_PREFIXES = ("src/", "public/", "static/", "assets/", "app/", "lib/")
@@ -53,6 +53,9 @@ def find_refs(root: Path, targets: list[str]) -> dict[str, dict]:
     files = list(iter_files(root, proj))
     texts: dict[str, list[str]] = {}
     for rel in files:
+        name = rel.rsplit("/", 1)[-1]
+        if matches_any(name, SECRET_FILE_GLOBS) and name not in SECRET_ALLOW:
+            continue  # 不读取密钥文件，避免把密钥内容带进输出
         p = root / rel
         try:
             if p.stat().st_size > MAX_BYTES:

@@ -40,11 +40,17 @@ SECRET_FILE_GLOBS = [
     "service-account*.json", "*.p12", "*.keystore",
 ]
 SECRET_ALLOW = {".env.example", ".env.sample", ".env.template"}
+# 密钥类规则：allow 豁免对它们无效，只能用 disable 显式关闭
+SECRET_RULES = {"secret-file", "secret-tracked", "secret-not-ignored"}
+# 包清单：生成物目录（dist/、build/…）只在项目根或清单文件旁边才算生成物
+MANIFEST_FILES = ["package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod", "pom.xml",
+                  "build.gradle", "build.gradle.kts", "deno.json"]
 
-# 版本 / 副本后缀：foo_v2, foo-new, foo.backup, foo copy, foo (1), 副本, 最终版
+# 版本 / 副本后缀：foo_v2, foo-new, foo.backup, foo copy, foo_copy2, foo (1), 副本, 最终版
+# 注意 "copy" 在内容项目里常指文案（hero-copy.md），所以只认系统复制产生的 " copy"、" copy 2" 和带编号的 _copy2
 VERSION_SUFFIX_RE = re.compile(
-    r"(?:[_\-. ](?:v\d+|new|old|backup|bak|copy|final|tmp|temp|orig|draft\d*|fixed|updated)"
-    r"|\s\(\d+\)|副本|最终版?|新版|旧版|备份)$",
+    r"(?:[_\-. ](?:v\d+|new|old|backup|bak|final|tmp|temp|orig|draft\d*|fixed|updated)"
+    r"|\scopy(?:\s?\d+)?|[_\-.]copy\d+|\s\(\d+\)|副本|最终版?|新版|旧版|备份)$",
     re.IGNORECASE,
 )
 # AI 常生成的任务报告类文档
@@ -57,10 +63,15 @@ STANDARD_DOCS = {
     "readme", "changelog", "license", "licence", "contributing", "code_of_conduct",
     "security", "agents", "claude", "gemini", "notice", "authors", "support",
 }
-# 临时 / 调试脚本名
+# 临时 / 调试脚本名。SCRATCH_NAME_RE 是无意义的名字，任何位置都报；
+# SCRATCH_PREFIX_RE 带描述（check_audio.py、debug_render.js），在已声明的工具目录里可能是正式工具，只在根目录报
 SCRATCH_NAME_RE = re.compile(
-    r"^(test\d*|tmp\d*|temp\d*|scratch\w*|debug\w*|untitled\w*|foo|bar|demo\d*|"
-    r"playground|try\w*|check_\w+|a+|xxx)\.(py|js|ts|mjs|cjs|sh|txt|md|json)$",
+    r"^(test\d*|tmp\d*|temp\d*|scratch\d*|debug\d*|untitled\d*|foo|bar|demo\d*|"
+    r"playground|try\d*|a+|xxx)\.(py|js|ts|mjs|cjs|sh|txt|md|json)$",
+    re.IGNORECASE,
+)
+SCRATCH_PREFIX_RE = re.compile(
+    r"^(scratch|debug|untitled|try|check)[_\-]?\w+\.(py|js|ts|mjs|cjs|sh|txt|md|json)$",
     re.IGNORECASE,
 )
 # 根目录允许的文件
@@ -107,13 +118,20 @@ class Finding:
 class Config:
     """项目级配置，来自 .claude/tidy.json（可选）。"""
     layout: dict[str, str] = field(default_factory=dict)   # "src/": "源码"
-    allow: list[str] = field(default_factory=list)          # 豁免的路径 glob
+    # 豁免：{"*": [对所有规则], "规则 id": [只对该规则]}；也接受旧格式的 glob 列表（等同 "*"）
+    allow: dict[str, list[str]] | list[str] = field(default_factory=dict)
+    keep_local: dict[str, str] = field(default_factory=dict)  # 本地保留、不进 git 的 glob → 原因
     root_allow: list[str] = field(default_factory=list)     # 额外允许放在根目录的文件 glob
     disable: list[str] = field(default_factory=list)        # 关闭的规则 id
     large_file_mb: float = 5.0
     max_root_files: int = 15
     hooks: bool = True                                       # false 时 hooks 不生效
     exists: bool = False
+    error: str = ""                                          # 配置文件存在但无法解析时的原因
+
+    def __post_init__(self):
+        if isinstance(self.allow, list):
+            self.allow = {"*": list(self.allow)} if self.allow else {}
 
     @property
     def layout_dirs(self) -> set[str]:
@@ -126,38 +144,105 @@ def load_config(root: Path) -> Config:
         return Config()
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return Config()
-    return Config(
-        layout=dict(data.get("layout", {})),
-        allow=list(data.get("allow", [])),
-        root_allow=list(data.get("rootAllow", [])),
-        disable=list(data.get("disable", [])),
-        large_file_mb=float(data.get("largeFileMB", 5.0)),
-        max_root_files=int(data.get("maxRootFiles", 15)),
-        hooks=bool(data.get("hooks", True)),
-        exists=True,
-    )
+        if not isinstance(data, dict):
+            raise ValueError("顶层必须是对象")
+        allow = data.get("allow", [])
+        if isinstance(allow, list):
+            allow = {"*": [str(g) for g in allow]} if allow else {}
+        elif isinstance(allow, dict):
+            allow = {str(k): _str_list(v, f"allow.{k}") for k, v in allow.items()}
+        else:
+            raise ValueError("allow 必须是 glob 列表或 {规则 id: glob 列表}")
+        keep = data.get("keepLocal", {})
+        if isinstance(keep, list):
+            keep = {str(g): "" for g in keep}
+        elif not isinstance(keep, dict):
+            raise ValueError("keepLocal 必须是 glob 列表或 {glob: 原因}")
+        layout = data.get("layout", {})
+        if not isinstance(layout, dict):
+            raise ValueError("layout 必须是 {目录: 说明}")
+        return Config(
+            layout={str(k): str(v) for k, v in layout.items()},
+            allow=allow,
+            keep_local={str(k): str(v) for k, v in keep.items()},
+            root_allow=_str_list(data.get("rootAllow", []), "rootAllow"),
+            disable=_str_list(data.get("disable", []), "disable"),
+            large_file_mb=float(data.get("largeFileMB", 5.0)),
+            max_root_files=int(data.get("maxRootFiles", 15)),
+            hooks=bool(data.get("hooks", True)),
+            exists=True,
+        )
+    except (OSError, ValueError, TypeError) as e:  # JSONDecodeError 是 ValueError 的子类
+        return Config(exists=True, error=f"{CONFIG_PATH} 无法解析，已按默认规则检查：{e}")
+
+
+def _str_list(v, name: str) -> list[str]:
+    if not isinstance(v, list):
+        raise ValueError(f"{name} 必须是列表")
+    return [str(x) for x in v]
 
 
 def matches_any(name: str, globs: list[str]) -> bool:
     return any(fnmatch.fnmatch(name, g) for g in globs)
 
 
-def is_exempt(rel: str, cfg: Config) -> bool:
-    rel = rel.rstrip("/")
-    return any(fnmatch.fnmatch(rel, g.rstrip("/")) or rel.startswith(g.rstrip("/") + "/") for g in cfg.allow)
+def path_matches(rel: str, pattern: str) -> bool:
+    """rel 本身或它的某个上级目录匹配 glob。支持 ** 匹配零或多层目录。"""
+    p = pattern.strip().rstrip("/")
+    if not p:
+        return False
+    variants = {p, p.replace("/**/", "/")}
+    if p.startswith("**/"):
+        variants.add(p[3:])
+    parts = rel.strip("/").split("/")
+    prefixes = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+    return any(fnmatch.fnmatch(pre, v) for v in variants for pre in prefixes)
+
+
+def is_exempt(rel: str, cfg: Config, rule: str | None = None) -> bool:
+    """rel 是否被 allow 豁免。密钥类规则永远不被 allow 豁免。"""
+    if rule in SECRET_RULES:
+        return False
+    globs = list(cfg.allow.get("*", []))
+    if rule:
+        globs += cfg.allow.get(rule, [])
+    return any(path_matches(rel, g) for g in globs)
+
+
+def keep_local_match(rel: str, cfg: Config) -> str | None:
+    """rel 匹配 keepLocal 时返回对应 glob。"""
+    return next((g for g in cfg.keep_local if path_matches(rel, g)), None)
 
 
 def apply_config(findings: list[Finding], cfg: Config) -> list[Finding]:
-    return [f for f in findings if f.rule not in cfg.disable and not is_exempt(f.path, cfg)]
+    return [f for f in findings if f.rule not in cfg.disable and not is_exempt(f.path, cfg, f.rule)]
 
 
-def artifact_dir_of(rel: str) -> str | None:
+def is_output_dir(root: Path | None, rel: str) -> bool:
+    """rel 是否是生成物目录：名字在 OUTPUT_DIRS 里，且位于项目根或包清单文件旁边。
+
+    docs/验证记录/L12/coverage/ 这种嵌在内容目录里的同名目录不算。
+    """
+    parts = rel.strip("/").split("/")
+    if parts[-1] not in OUTPUT_DIRS:
+        return False
+    if len(parts) == 1:
+        return True
+    if root is None:
+        return False
+    parent = root.joinpath(*parts[:-1])
+    return any((parent / m).is_file() for m in MANIFEST_FILES)
+
+
+def is_dependency_dir(name: str) -> bool:
+    return name in DEPENDENCY_DIRS or name.endswith(".egg-info")
+
+
+def artifact_dir_of(rel: str, root: Path | None = None) -> str | None:
     """路径位于依赖 / 生成物目录下时，返回该目录的相对路径（带 /）。"""
     parts = rel.strip("/").split("/")
     for i, seg in enumerate(parts[:-1] if not rel.endswith("/") else parts):
-        if seg in DEPENDENCY_DIRS or seg in OUTPUT_DIRS or seg.endswith(".egg-info"):
+        if is_dependency_dir(seg) or is_output_dir(root, "/".join(parts[: i + 1])):
             return "/".join(parts[: i + 1]) + "/"
     return None
 
@@ -202,7 +287,8 @@ def check_path(rel: str, cfg: Config, is_dir: bool = False) -> list[Finding]:
         out.append(Finding("ai-report-doc", "warn", shown, "疑似 AI 任务报告 / 总结类文档",
                            "总结写进回复和 commit message；有长期价值的内容合并进 README 或 docs/ 已有文档"))
         placement_reported = True
-    if not is_dir and SCRATCH_NAME_RE.match(name) and not (set(parts[:-1]) & TEST_DIRS):
+    if not is_dir and not (set(parts[:-1]) & TEST_DIRS) and (
+            SCRATCH_NAME_RE.match(name) or (len(parts) == 1 and SCRATCH_PREFIX_RE.match(name))):
         out.append(Finding("scratch-file", "warn", shown, "疑似临时 / 调试脚本",
                            "临时文件放 .scratch/（已忽略）或系统临时目录，用完即删；需要长期保留就按用途命名并放进 scripts/"))
         placement_reported = True
@@ -251,7 +337,7 @@ class Project:
             if gi.is_file():
                 for line in gi.read_text(encoding="utf-8", errors="replace").splitlines():
                     line = line.strip()
-                    if line and not line.startswith(("#", "!")):
+                    if line and not line.startswith("#"):
                         self.gitignore_patterns.append(line)
 
     def _git(self, args: list[str]) -> str:
@@ -291,21 +377,32 @@ class Project:
         return self._match_gitignore(rel, False)
 
     def _match_gitignore(self, rel: str, is_dir: bool) -> bool:
+        """近似 git 的匹配：按顺序检查，最后一条命中的规则生效，! 表示重新包含。"""
         name = rel.rsplit("/", 1)[-1]
         segs = rel.split("/")
-        for pat in self.gitignore_patterns:
+        ignored = False
+        for raw in self.gitignore_patterns:
+            negate = raw.startswith("!")
+            pat = raw[1:] if negate else raw
             anchored = pat.startswith("/")
             p = pat.strip("/")
             dir_only = pat.endswith("/")
+            variants = {p, p.replace("/**/", "/")}
+            if p.startswith("**/"):
+                variants.add(p[3:])
+            hit = False
             if anchored or "/" in p:
-                if rel.startswith(p + "/") or ((is_dir or not dir_only) and fnmatch.fnmatch(rel, p)):
-                    return True
+                for v in variants:
+                    if rel.startswith(v + "/") or ((is_dir or not dir_only) and fnmatch.fnmatch(rel, v)) \
+                            or any(fnmatch.fnmatch("/".join(segs[:i]), v) for i in range(1, len(segs))):
+                        hit = True
+                        break
             else:
-                if any(fnmatch.fnmatch(s, p) for s in segs[:-1]):
-                    return True
-                if (is_dir or not dir_only) and fnmatch.fnmatch(name, p):
-                    return True
-        return False
+                hit = any(fnmatch.fnmatch(s, p) for s in segs[:-1]) or \
+                    ((is_dir or not dir_only) and fnmatch.fnmatch(name, p))
+            if hit:
+                ignored = not negate
+        return ignored
 
 
 def iter_files(root: Path, proj: Project) -> Iterator[str]:
@@ -316,7 +413,7 @@ def iter_files(root: Path, proj: Project) -> Iterator[str]:
         keep = []
         for d in dirnames:
             rel = f"{rel_dir}/{d}" if rel_dir else d
-            if d in SKIP_DIRS or d in DEPENDENCY_DIRS or d in OUTPUT_DIRS or d.endswith(".egg-info"):
+            if d in SKIP_DIRS or is_dependency_dir(d) or is_output_dir(root, rel):
                 continue
             if proj.is_ignored(rel, True):
                 continue

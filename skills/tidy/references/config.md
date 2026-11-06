@@ -13,7 +13,14 @@
     "tools/": "Python 辅助工具，每个子目录自带 README 和依赖",
     "docs/": "视频文案、提示词、分镜等创作资料；过时资料放 docs/archive/"
   },
-  "allow": ["public/audio/*.wav"],
+  "allow": {
+    "non-portable-name": ["docs/课程/**"],
+    "duplicate-file": ["docs/**/验证记录/**"]
+  },
+  "keepLocal": {
+    "out/**": "成片，渲染约 2 小时，验收后交付",
+    "voice/**/*.wav": "已验收配音母带，重配需付费并重新验收"
+  },
   "rootAllow": [],
   "disable": [],
   "largeFileMB": 20,
@@ -27,16 +34,21 @@
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `layout` | `{目录: 说明}` | `{}` | 允许的顶层目录及用途。非空时，在未声明的顶层目录下新建文件会被拦截。以 `.` 开头的目录（`.github/`、`.claude/`）和依赖 / 生成物目录不受限制。说明会在每次会话开始时注入给 AI，**写成能指导放置决策的句子**。 |
-| `allow` | glob 列表 | `[]` | 豁免路径，所有规则都跳过。例如用户明确要保留的中文文件名 `docs/*.md`。 |
+| `allow` | `{规则 id: glob 列表}` 或 glob 列表 | `{}` | 按规则豁免路径。键为规则 id 时只豁免该规则；键为 `"*"` 时豁免所有规则；直接写列表等同于 `"*"`（旧格式）。**优先按规则写**，例如只给学生课包放开中文名：`{"non-portable-name": ["docs/课程/**"]}`，内部代码仍受检查。密钥规则（`secret-*`）永远不会被 allow 豁免。 |
+| `keepLocal` | `{glob: 原因}` 或 glob 列表 | `{}` | **本地保留、不进 git** 的文件：可以重新生成但成本高的交付物和素材（成片、已验收配音、模型权重、课包）。审计要求它们被 `.gitignore` 忽略（`--fix-gitignore` 会自动补），并且不会建议删除；会话开始时会把清单和原因告诉 AI。 |
 | `rootAllow` | glob 列表 | `[]` | 额外允许放在根目录的文件（默认白名单见 structure.md）。 |
-| `disable` | 规则 id 列表 | `[]` | 整个关闭某些规则，例如 `["non-portable-name"]`。 |
+| `disable` | 规则 id 列表 | `[]` | 整个关闭某些规则。只在全项目都不适用时用；只是部分目录例外请用 `allow` 按规则豁免。 |
 | `largeFileMB` | 数字 | `5` | 超过此大小报 `large-file`。 |
 | `maxRootFiles` | 数字 | `15` | 根目录文件数上限。 |
 | `hooks` | 布尔 | `true` | `false` 时该项目关闭所有 hooks（审计脚本仍可用）。 |
 
+glob 写法：相对项目根；匹配文件本身或它的任一上级目录（`docs/a` 会覆盖 `docs/a/` 下所有文件）；`**` 匹配零到多层目录。
+
+配置文件写错（JSON 格式错误、字段类型不对）时，审计报 `config-invalid` 错误，会话开始的提示里也会提醒，其余检查按默认规则进行。
+
 ## 规则 id
 
-`version-suffix`、`ai-report-doc`、`scratch-file`、`non-portable-name`、`root-stray-file`、`undeclared-dir`、`junk-file`、`secret-file`、`artifact-not-ignored`、`tracked-artifact`、`secret-tracked`、`secret-not-ignored`、`large-file`、`duplicate-file`、`empty-file`、`empty-dir`、`mixed-naming`、`readme-missing-dir`、`layout-missing-dir`、`multiple-lockfiles`、`root-clutter`、`deep-nesting`、`missing-readme`、`missing-gitignore`、`not-git-repo`、`no-layout`。
+`config-invalid`、`keep-local-tracked`、`keep-local-not-ignored`、`version-suffix`、`ai-report-doc`、`scratch-file`、`non-portable-name`、`root-stray-file`、`undeclared-dir`、`junk-file`、`secret-file`、`artifact-not-ignored`、`tracked-artifact`、`secret-tracked`、`secret-not-ignored`、`large-file`、`duplicate-file`、`empty-file`、`empty-dir`、`mixed-naming`、`readme-missing-dir`、`layout-missing-dir`、`multiple-lockfiles`、`root-clutter`、`deep-nesting`、`missing-readme`、`missing-gitignore`、`not-git-repo`、`no-layout`。
 
 ## 维护
 

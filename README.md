@@ -96,7 +96,7 @@ cp -r skills/tidy ~/.claude/skills/
 
 ```bash
 S=skills/tidy/scripts
-python3 $S/audit.py <项目>                    # 审计报告
+python3 $S/audit.py <项目>                    # 审计报告（同类问题多时折叠，--all 展开）
 python3 $S/audit.py <项目> --fail-on error    # CI 中使用，有 error 时退出码 1
 python3 $S/audit.py <项目> --init             # 生成 .claude/tidy.json 草稿
 python3 $S/audit.py <项目> --fix-gitignore    # 把应忽略的内容补进 .gitignore（只追加）
@@ -115,29 +115,32 @@ python3 $S/refs.py  <项目> src/Root_old.tsx   # 这个文件被谁引用？
     "scripts/": "生成配音、批量渲染等脚本",
     "docs/": "文案、提示词、分镜；过时资料放 docs/archive/"
   },
-  "allow": [],
+  "allow": { "non-portable-name": ["docs/lessons/**"] },
+  "keepLocal": { "out/**": "成片，渲染约 2 小时" },
   "disable": []
 }
 ```
 
-用户明确想要的"例外"（比如就要中文文件名）加进 `allow`；不想在某个项目启用 hooks，写 `"hooks": false`。
+用户明确想要的"例外"（比如学生课包就要中文文件名）按规则加进 `allow`，其他目录仍受检查；成本高、要留在本地但不进 git 的成片、配音、模型登记到 `keepLocal`，审计会要求忽略它们，并且不会建议删除。不想在某个项目启用 hooks，写 `"hooks": false`。
 
 ### 审计规则
 
 | 规则 | 级别 | 检查内容 | Hook 拦截 |
 |---|---|---|---|
 | `artifact-not-ignored` / `tracked-artifact` | error / warn | 依赖、缓存、生成物目录未忽略或已被跟踪 | Stop |
-| `secret-tracked` / `secret-not-ignored` | error | `.env`、私钥、凭据文件被跟踪或未忽略 | Stop |
+| `secret-tracked` / `secret-not-ignored` | error | `.env`、私钥、凭据文件被跟踪或未忽略（`allow` 不能豁免） | Stop |
+| `config-invalid` | error | `.claude/tidy.json` 无法解析 | |
+| `keep-local-tracked` / `keep-local-not-ignored` | warn | `keepLocal` 登记的文件被跟踪或未忽略 | Stop |
 | `missing-readme` / `missing-gitignore` | error | 缺少 README 或 .gitignore | |
 | `version-suffix` | warn | `*_v2`、`*_old`、`*.backup`、`* copy`、`(1)`、`最终版` 等副本 | ✅ |
 | `ai-report-doc` | warn | `docs/` 以外的 `*_SUMMARY.md`、`*_REPORT.md` 等任务报告 | ✅ |
-| `scratch-file` | warn | `test.py`、`debug.js`、`check_*.py` 等临时脚本（测试目录除外） | ✅ |
+| `scratch-file` | warn | `test.py`、`debug.js` 等临时脚本；`check_*.py` 这类带描述的只在根目录报（测试目录除外） | ✅ |
 | `non-portable-name` | warn | 中文、空格、括号等文件名 | ✅ |
 | `root-stray-file` | warn | 根目录下的非入口级文件 | ✅ |
 | `undeclared-dir` | warn | 文件放在目录约定之外的顶层目录 | ✅ |
 | `junk-file` | warn | `.DS_Store`、`*.log`、`*.bak` 等 | ✅ |
 | `multiple-lockfiles` / `root-clutter` / `large-file` | warn | 多个 lockfile / 根目录文件过多 / 大文件 | |
-| `duplicate-file` / `empty-file` / `empty-dir` | info | 重复、空文件、空目录 | |
+| `duplicate-file` / `empty-file` / `empty-dir` | info | 重复（同目录多组合并为一条）、空文件、空目录（只含被忽略文件的不算） | |
 | `mixed-naming` | info | 同目录同类文件混用 kebab-case 和 snake_case | |
 | `readme-missing-dir` / `layout-missing-dir` / `no-layout` | info | README 或目录约定与实际目录不一致 / 缺少目录约定 | |
 | `deep-nesting` / `not-git-repo` | info / warn | 层级过深 / 不是 git 仓库 | |
