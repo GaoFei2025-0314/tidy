@@ -1,6 +1,6 @@
 {
   "name": "tidy",
-  "owner": { "name": "tidy maintainers" },
+  "owner": { "name": "GAOFEI" },
   "plugins": [
     {
       "name": "tidy",

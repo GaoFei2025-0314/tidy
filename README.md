@@ -48,7 +48,7 @@ AI 用 Bash 生成了临时脚本、构建产物和 `.env.local`，准备结束�
 ### 方式一：Claude Code 插件（推荐，包含 hooks）
 
 ```
-/plugin marketplace add <你的 GitHub 用户名>/tidy
+/plugin marketplace add GaoFei2025-0314/tidy
 /plugin install tidy@tidy
 ```
 
