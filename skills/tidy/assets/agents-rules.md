@@ -1,6 +1,6 @@
 ## 文件整洁规范
 
-<!-- 给不支持 Claude Code hooks 的 AI 工具（Cursor、Codex 等）使用；Claude Code 安装插件后会自动注入同等规则。 -->
+<!-- 常驻规则：粘贴进 AGENTS.md（Codex、Cursor、Copilot 等）、CLAUDE.md 或 GEMINI.md，让任何 Agent 始终遵守。用 install.py 装了自动检查的 Agent 会在会话开始时自动收到同等规则。 -->
 
 新建文件前先问：必要吗（能否并入已有文件）？放哪（遵循现有目录约定）？叫什么（与同目录风格一致、只用 ASCII）？该提交吗（生成物 / 依赖 / 密钥 / 大文件不提交）？
 
@@ -14,8 +14,8 @@
 
 每次任务结束前：运行 `python3 <tidy skill>/scripts/audit.py . --changed`（非 git 项目用 `--since 2h`），逐条核实并处理；删除临时文件；新增顶层目录时更新 README「目录结构」；新出现的生成物补进 `.gitignore`。核实后确认无需处理的告警用 `--review <规则> <路径> --reason <结论>` 记录。
 
-本地要保留但不进 git 的成片、配音、模型等登记在 `.claude/tidy.json` 的 `keepLocal`，不要当作生成物删除。
+本地要保留但不进 git 的成片、配音、模型等登记在 `.tidy.json` 的 `keepLocal`，不要当作生成物删除。
 
 删除或批量移动文件前先征得同意；移动文件用 `git mv`，并修复所有引用。
 
-目录约定见 `.claude/tidy.json` 的 `layout`：新文件放进已声明的目录，确需新顶层目录时先在 layout 和 README 中登记。
+目录约定见 `.tidy.json` 的 `layout`：新文件放进已声明的目录，确需新顶层目录时先在 layout 和 README 中登记。

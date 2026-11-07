@@ -4,7 +4,7 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" session-start", "timeout": 20 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" session-start --agent claude", "timeout": 20 }
         ]
       }
     ],
@@ -12,14 +12,14 @@
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" pre-write", "timeout": 10 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" pre-write --agent claude", "timeout": 10 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" stop", "timeout": 20 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/tidy/scripts/hook.py\" stop --agent claude", "timeout": 20 }
         ]
       }
     ]

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -77,7 +78,7 @@ class CleanProjectTest(unittest.TestCase):
             root = Path(d)
             write(root, "README.md", "# demo\n\n- src/ 源码\n- docs/ 文档\n")
             write(root, ".gitignore", "node_modules/\nout/\n.env\n")
-            write(root, ".claude/tidy.json", json.dumps(LAYOUT))
+            write(root, ".tidy.json", json.dumps(LAYOUT))
             write(root, "package.json", '{"name": "demo"}')
             write(root, "src/index.ts", "export const a = 1\n")
             write(root, "docs/prompts.md", "# 提示词\n")
@@ -171,7 +172,7 @@ class InitAndFixTest(unittest.TestCase):
             quiet.__enter__()
             self.addCleanup(quiet.__exit__, None, None, None)
             self.assertEqual(audit.main([str(root), "--init"]), 0)
-            cfg = json.loads((root / ".claude/tidy.json").read_text(encoding="utf-8"))
+            cfg = json.loads((root / ".tidy.json").read_text(encoding="utf-8"))
             self.assertEqual(set(cfg["layout"]), {"src/", "voice/"})
             self.assertEqual(audit.main([str(root), "--init"]), 1)  # 不覆盖
 
@@ -204,7 +205,7 @@ class HookTest(unittest.TestCase):
         self.root = Path(self._tmp.name)
         write(self.root, "README.md", "# demo\n- src/\n- docs/\n")
         write(self.root, ".gitignore", "node_modules/\n.scratch/\n")
-        write(self.root, ".claude/tidy.json", json.dumps(LAYOUT))
+        write(self.root, ".tidy.json", json.dumps(LAYOUT))
         write(self.root, "src/index.ts")
         write(self.root, "legacy_old.py")  # 会话前就存在的问题不应被 hook 追究
         git_commit_all(self.root)
@@ -214,10 +215,16 @@ class HookTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def hook(self, event, **extra):
+        """以 Claude Code 协议调用 hook，返回（2=拦截 / 0=放行, stdout, 拦截原因）。"""
         data = {"session_id": self.session, "cwd": str(self.root), **extra}
         r = subprocess.run([sys.executable, str(SCRIPTS / "hook.py"), event], input=json.dumps(data),
                            capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
-        return r.returncode, r.stdout, r.stderr
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout) if r.stdout.strip() else {}
+        reason = (out.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                  if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+                  else out.get("reason", "") if out.get("decision") == "block" else "")
+        return (2 if reason else 0), r.stdout, reason
 
     def write_hook(self, rel):
         return self.hook("pre-write", tool_name="Write", tool_input={"file_path": str(self.root / rel)})
@@ -253,13 +260,13 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.write_hook("docs/coverage/notes_v2.md")[0], 2)
 
     def test_session_start_reports_bad_config_and_keep_local(self):
-        write(self.root, ".claude/tidy.json", "{bad")
+        write(self.root, ".tidy.json", "{bad")
         self.assertIn("无法解析", self.hook("session-start")[1])
-        write(self.root, ".claude/tidy.json", json.dumps({**LAYOUT, "keepLocal": {"out/**": "成片"}}))
+        write(self.root, ".tidy.json", json.dumps({**LAYOUT, "keepLocal": {"out/**": "成片"}}))
         self.assertIn("out/** — 成片", self.hook("session-start")[1])
 
     def test_stop_flags_keep_local_not_ignored(self):
-        write(self.root, ".claude/tidy.json", json.dumps({**LAYOUT, "keepLocal": ["src/media/*.wav"]}))
+        write(self.root, ".tidy.json", json.dumps({**LAYOUT, "keepLocal": ["src/media/*.wav"]}))
         self.hook("session-start")
         write(self.root, "src/media/a.wav")
         code, _, err = self.hook("stop", stop_hook_active=False)
@@ -290,7 +297,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.hook("stop", stop_hook_active=False)[0], 0)  # 旧格式：重建基线，不误报
 
     def test_hooks_can_be_disabled(self):
-        write(self.root, ".claude/tidy.json", json.dumps({"hooks": False}))
+        write(self.root, ".tidy.json", json.dumps({"hooks": False}))
         self.assertEqual(self.write_hook("FIX_REPORT.md")[0], 0)
 
 
@@ -357,12 +364,12 @@ class RegressionTest(unittest.TestCase):
     def test_invalid_config_is_reported(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            write(root, ".claude/tidy.json", '{"layout": {"src/": "x"},}')
+            write(root, ".tidy.json", '{"layout": {"src/": "x"},}')
             cfg = rules.load_config(root)
             self.assertTrue(cfg.error)
             findings, _ = audit.audit(root)
             self.assertIn("config-invalid", {f.rule for f in findings})
-            write(root, ".claude/tidy.json", '{"allow": "docs/*"}')
+            write(root, ".tidy.json", '{"allow": "docs/*"}')
             self.assertTrue(rules.load_config(root).error)
 
     def test_refs_skips_secret_files(self):
@@ -419,7 +426,7 @@ class RegressionTest(unittest.TestCase):
             root = Path(d)
             write(root, "README.md", "# demo\n- voice/\n")
             write(root, ".gitignore", "node_modules/\n")
-            write(root, ".claude/tidy.json", json.dumps(
+            write(root, ".tidy.json", json.dumps(
                 {"layout": {"voice/": "配音"}, "keepLocal": {"voice/**/*.wav": "已验收配音母带，重配成本高"}}))
             write(root, "voice/L01/a.wav")
             write(root, "voice/L01/b.wav")
@@ -445,7 +452,7 @@ class WorkflowTest(unittest.TestCase):
         self.root = root = Path(self._tmp.name)
         write(root, "README.md", "# demo\n- src/\n- docs/\n")
         write(root, ".gitignore", "node_modules/\n")
-        write(root, ".claude/tidy.json", json.dumps(LAYOUT))
+        write(root, ".tidy.json", json.dumps(LAYOUT))
         write(root, "src/old_v2.ts")
         write(root, "src/plates/belt.jpg", "j" * 200)
         write(root, "docs/pack/belt.jpg", "j" * 200)
@@ -492,7 +499,7 @@ class WorkflowTest(unittest.TestCase):
                                          "--reason", "x"]), 1)  # 没有这条告警
             self.assertEqual(audit.main([str(self.root), "--review", "version-suffix", "src/old_v2.ts",
                                          "--reason", "第三方 SDK 的文件名"]), 0)
-        cfg = json.loads((self.root / ".claude/tidy.json").read_text(encoding="utf-8"))
+        cfg = json.loads((self.root / ".tidy.json").read_text(encoding="utf-8"))
         self.assertEqual(cfg["layout"], LAYOUT["layout"])  # 原有配置保留
         findings, summary = audit.audit(self.root)
         self.assertNotIn("src/old_v2.ts", {f.path for f in findings})
@@ -522,6 +529,189 @@ class NonGitIgnoreTest(unittest.TestCase):
             self.assertTrue(proj.is_ignored("out/x/y.mp4", False))
             self.assertFalse(proj.is_ignored("src/out/y.mp4", False))
 
+
+
+class MultiAgentHookTest(unittest.TestCase):
+    """各 Agent 的 hook 协议：同一套检查，输出格式不同。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        write(self.root, "README.md", "# demo\n- src/\n- docs/\n")
+        write(self.root, ".gitignore", ".scratch/\n")
+        write(self.root, ".tidy.json", json.dumps(LAYOUT))
+        write(self.root, "src/index.ts")
+        git_commit_all(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_hook(self, event, data, agent=None, env=None):
+        args = [sys.executable, str(SCRIPTS / "hook.py"), event] + (["--agent", agent] if agent else [])
+        r = subprocess.run(args, input=json.dumps(data), capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin", **(env or {})})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout) if r.stdout.strip() else None
+
+    def test_codex_apply_patch(self):
+        patch = "*** Begin Patch\n*** Add File: src/Title_v2.tsx\n+x\n*** End Patch\n"
+        out = self.run_hook("pre-write", {"session_id": "c", "turn_id": "t", "cwd": str(self.root / "src"),
+                                          "tool_name": "apply_patch", "tool_input": {"command": patch}})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("src/Title_v2.tsx", out["hookSpecificOutput"]["permissionDecisionReason"])
+        ok = "*** Begin Patch\n*** Add File: src/title-card.tsx\n+x\n*** End Patch\n"
+        self.assertIsNone(self.run_hook("pre-write", {"turn_id": "t", "cwd": str(self.root),
+                                                      "tool_input": {"command": ok}}))
+
+    def test_codex_stop_always_json(self):
+        data = {"session_id": "c2", "turn_id": "t", "cwd": str(self.root)}
+        self.run_hook("session-start", data, "codex")
+        self.assertEqual(self.run_hook("stop", data, "codex"), {})
+        write(self.root, "debug.py")
+        out = self.run_hook("stop", data, "codex")
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("debug.py", out["reason"])
+
+    def test_gemini(self):
+        env = {"GEMINI_PROJECT_DIR": str(self.root), "GEMINI_SESSION_ID": "g1"}
+        ctx = self.run_hook("session-start", {"hook_event_name": "SessionStart"}, env=env)
+        self.assertIn("src/ — 源码", ctx["hookSpecificOutput"]["additionalContext"])
+        out = self.run_hook("pre-write", {"hook_event_name": "BeforeTool", "tool_name": "write_file",
+                                          "tool_input": {"file_path": "FIX_REPORT.md"}}, env=env)
+        self.assertEqual(out["decision"], "deny")
+        self.assertEqual(self.run_hook("pre-write", {"hook_event_name": "BeforeTool",
+                                                     "tool_input": {"file_path": "src/title.ts"}}, env=env), {})
+        write(self.root, "notes_old.md")
+        out = self.run_hook("stop", {"hook_event_name": "AfterAgent", "stop_hook_active": False}, env=env)
+        self.assertEqual(out["decision"], "deny")
+
+    def test_cursor(self):
+        base = {"conversation_id": "cu1", "cursor_version": "2.5", "workspace_roots": [str(self.root)]}
+        ctx = self.run_hook("session-start", base)
+        self.assertIn("src/ — 源码", ctx["additional_context"])
+        out = self.run_hook("pre-write", {**base, "tool_name": "Write",
+                                          "tool_input": {"file_path": str(self.root / "src/Title_v2.tsx")}})
+        self.assertEqual(out["permission"], "deny")
+        ok = self.run_hook("pre-write", {**base, "tool_input": {"file_path": str(self.root / "src/title.tsx")}})
+        self.assertEqual(ok, {"permission": "allow"})  # Cursor 的拦截类 hook 必须收到合法 JSON
+        write(self.root, "tmp.js")
+        out = self.run_hook("stop", {**base, "status": "completed", "loop_count": 0})
+        self.assertIn("tmp.js", out["followup_message"])
+        self.assertEqual(self.run_hook("stop", {**base, "status": "completed", "loop_count": 1}), {})
+
+    def test_errors_fail_open_with_valid_json(self):
+        write(self.root, ".tidy.json", json.dumps({"hooks": False}))
+        base = {"conversation_id": "cu2", "workspace_roots": [str(self.root)]}
+        self.assertEqual(self.run_hook("pre-write", {**base, "tool_input": {"file_path": "x_v2.py"}}),
+                         {"permission": "allow"})
+
+
+class PreCommitTest(unittest.TestCase):
+    def test_blocks_only_new_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n")
+            write(root, ".gitignore", "")
+            write(root, "legacy_old.py")
+            git_commit_all(root)
+
+            def commit_check():
+                return subprocess.run([sys.executable, str(SCRIPTS / "hook.py"), "pre-commit"], cwd=root,
+                                      capture_output=True, text=True)
+
+            write(root, "legacy_old.py", "changed")  # 修改已有文件不拦
+            write(root, "src/title.ts")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            self.assertEqual(commit_check().returncode, 0)
+
+            write(root, "FIX_REPORT.md")
+            write(root, ".env", "K=1")
+            write(root, "node_modules/x/index.js")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            r = commit_check()
+            self.assertEqual(r.returncode, 1)
+            for s in ("FIX_REPORT.md", ".env", "node_modules/"):
+                self.assertIn(s, r.stderr)
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        import install  # noqa: E402
+        self.install = install
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_install(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            code = self.install.main([str(self.root), *args])
+        return code, buf.getvalue()
+
+    def test_install_merge_idempotent_uninstall(self):
+        write(self.root, ".gemini/settings.json", json.dumps({"theme": "dark", "hooks": {
+            "BeforeTool": [{"matcher": "run_shell", "hooks": [{"type": "command", "command": "other.sh"}]}]}}))
+        self.assertEqual(self.run_install("--agents", "all")[0], 0)
+        self.assertEqual(self.run_install("--agents", "all")[0], 0)  # 重复运行不重复添加
+
+        gem = json.loads((self.root / ".gemini/settings.json").read_text())
+        self.assertEqual(gem["theme"], "dark")
+        self.assertEqual(len(gem["hooks"]["BeforeTool"]), 2)
+        self.assertEqual(gem["hooks"]["BeforeTool"][1]["matcher"], "write_file")
+        codex = json.loads((self.root / ".codex/hooks.json").read_text())
+        self.assertEqual(len(codex["hooks"]["Stop"]), 1)
+        self.assertIn("--agent codex", codex["hooks"]["Stop"][0]["hooks"][0]["command"])
+        cursor = json.loads((self.root / ".cursor/hooks.json").read_text())
+        self.assertEqual(cursor["version"], 1)
+        self.assertIn("pre-write --agent cursor", cursor["hooks"]["preToolUse"][0]["command"])
+        claude = json.loads((self.root / ".claude/settings.json").read_text())
+        self.assertEqual(claude["hooks"]["PreToolUse"][0]["matcher"], "Write")
+        pre = self.root / ".git/hooks/pre-commit"
+        self.assertTrue(os.access(pre, os.X_OK))
+
+        self.assertEqual(self.run_install("--agents", "all", "--uninstall")[0], 0)
+        gem = json.loads((self.root / ".gemini/settings.json").read_text())
+        self.assertEqual(gem["hooks"]["BeforeTool"][0]["hooks"][0]["command"], "other.sh")
+        self.assertNotIn("tidy", json.dumps(gem))
+        self.assertNotIn("hooks", json.loads((self.root / ".codex/hooks.json").read_text()))
+        self.assertFalse(pre.exists())
+
+    def test_keeps_foreign_pre_commit(self):
+        write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\nnpm test\n")
+        code, out = self.run_install("--agents", "git")
+        self.assertIn("未覆盖", out)
+        self.assertEqual((self.root / ".git/hooks/pre-commit").read_text(), "#!/bin/sh\nnpm test\n")
+
+    def test_relative_paths_when_skill_inside_project(self):
+        self.assertIn('"$GEMINI_PROJECT_DIR/.agents/skills/tidy/scripts/hook.py" stop --agent gemini',
+                      self._command_for("gemini", "stop"))
+        self.assertIn('"$(git rev-parse --show-toplevel)/.agents/skills/tidy/scripts/hook.py"',
+                      self._command_for("codex", "pre-write"))
+
+    def _command_for(self, agent, event):
+        fake = self.root / ".agents/skills/tidy/scripts/hook.py"
+        old = self.install.HOOK
+        self.install.HOOK = fake
+        try:
+            return self.install.hook_command(agent, event, self.root)
+        finally:
+            self.install.HOOK = old
+
+
+class LegacyConfigTest(unittest.TestCase):
+    def test_legacy_location_still_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            write(root, "README.md", "# demo\n- src/\n")
+            write(root, ".gitignore", "")
+            write(root, ".claude/tidy.json", json.dumps({"layout": {"src/": "源码"}}))
+            write(root, "src/a.ts")
+            git_commit_all(root)
+            self.assertEqual(rules.load_config(root).layout, {"src/": "源码"})
+            findings, _ = audit.audit(root)
+            self.assertIn("config-legacy", {f.rule for f in findings})
 
 if __name__ == "__main__":
     unittest.main()

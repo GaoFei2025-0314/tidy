@@ -1,6 +1,6 @@
 """tidy 的共享规则：命名 / 位置检查、项目配置、忽略判断、文件遍历。
 
-audit.py（整体审计）、hook.py（Claude Code hooks）、refs.py（引用查找）都基于本模块，
+audit.py（整体审计）、hook.py（各 Agent 的 hooks 与 git pre-commit）、refs.py（引用查找）都基于本模块，
 保证三者对"什么是不规范"的判断完全一致。只依赖 Python 标准库。
 """
 
@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Iterator
 
 SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
-CONFIG_PATH = ".claude/tidy.json"
+CONFIG_PATH = ".tidy.json"
+# 旧版位置，仍可读取；新生成的配置一律写到 CONFIG_PATH
+LEGACY_CONFIG_PATHS = (".claude/tidy.json",)
 
 # 依赖 / 缓存目录：出现即应被忽略，扫描时不进入
 DEPENDENCY_DIRS = {
@@ -89,7 +91,7 @@ ROOT_ALLOWED_GLOBS = [
     ".env.example", ".env.sample", "biome.json", "turbo.json", "nx.json", "vercel.json",
     "netlify.toml", ".pre-commit-config.yaml", "ruff.toml", "mypy.ini", "pytest.ini",
     "tox.ini", ".flake8", "renovate.json", ".releaserc*", "lerna.json", "deno.json",
-    "components.json", "index.html", ".mcp.json",
+    "components.json", "index.html", ".mcp.json", ".tidy.json",
 ]
 LOCKFILES = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"]
 PORTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9._\-@+]+$")
@@ -101,7 +103,8 @@ KNOWN_DIR_PURPOSES = {
     "scripts": "开发 / 构建脚本", "tools": "独立的辅助工具", "docs": "文档",
     "tests": "测试", "test": "测试", "examples": "示例", "config": "配置",
     "packages": "monorepo 共享包", "apps": "monorepo 应用", ".github": "GitHub 配置与 CI",
-    ".claude": "Claude Code 配置",
+    ".claude": "Claude Code 配置", ".codex": "Codex 配置", ".gemini": "Gemini CLI 配置",
+    ".cursor": "Cursor 配置", ".agents": "通用 Agent 配置与 skills",
 }
 
 
@@ -116,7 +119,7 @@ class Finding:
 
 @dataclass
 class Config:
-    """项目级配置，来自 .claude/tidy.json（可选）。"""
+    """项目级配置，来自 .tidy.json（可选；旧版 .claude/tidy.json 也可读取）。"""
     layout: dict[str, str] = field(default_factory=dict)   # "src/": "源码"
     # 豁免：{"*": [对所有规则], "规则 id": [只对该规则]}；也接受旧格式的 glob 列表（等同 "*"）
     allow: dict[str, list[str]] | list[str] = field(default_factory=dict)
@@ -139,8 +142,16 @@ class Config:
         return {k.strip("/") for k in self.layout}
 
 
+def config_file(root: Path) -> Path:
+    """当前生效的配置文件：优先 .tidy.json，其次旧版位置；都不存在时返回 .tidy.json。"""
+    for rel in (CONFIG_PATH, *LEGACY_CONFIG_PATHS):
+        if (root / rel).is_file():
+            return root / rel
+    return root / CONFIG_PATH
+
+
 def load_config(root: Path) -> Config:
-    p = root / CONFIG_PATH
+    p = config_file(root)
     if not p.is_file():
         return Config()
     try:
@@ -180,7 +191,7 @@ def load_config(root: Path) -> Config:
             exists=True,
         )
     except (OSError, ValueError, TypeError) as e:  # JSONDecodeError 是 ValueError 的子类
-        return Config(exists=True, error=f"{CONFIG_PATH} 无法解析，已按默认规则检查：{e}")
+        return Config(exists=True, error=f"{p.relative_to(root).as_posix()} 无法解析，已按默认规则检查：{e}")
 
 
 def _str_list(v, name: str) -> list[str]:

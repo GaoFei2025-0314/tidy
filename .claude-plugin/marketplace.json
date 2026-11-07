@@ -1,11 +1,13 @@
 {
   "name": "tidy",
-  "owner": { "name": "GAOFEI" },
+  "owner": {
+    "name": "GAOFEI"
+  },
   "plugins": [
     {
       "name": "tidy",
       "source": "./",
-      "description": "规范 AI 生成项目的文件整洁度：文件必要性、目录归属、命名、归档与 README 说明，通过 hooks 自动拦截不合规文件，附审计、引用查找和整理命令。"
+      "description": "让 AI 写的项目保持整洁的通用 Agent Skill：文件必要性、目录归属、命名、归档。自动检查支持 Claude Code、Codex、Gemini CLI、Cursor 和 git pre-commit。"
     }
   ]
 }

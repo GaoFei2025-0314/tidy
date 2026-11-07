@@ -8,7 +8,7 @@
     python3 audit.py [项目路径] --changed [REF]     # 只报告相对 REF（默认 HEAD）新增 / 修改的文件，git 项目
     python3 audit.py [项目路径] --since 2h         # 只报告最近修改的文件（按修改时间，非 git 项目也可用）
     python3 audit.py [项目路径] --review 规则 路径 --reason 原因   # 记录一条已核实的告警，文件变化前不再报告
-    python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .claude/tidy.json 草稿
+    python3 audit.py [项目路径] --init            # 按现有顶层目录生成 .tidy.json 草稿
     python3 audit.py [项目路径] --fix-gitignore   # 把未忽略的依赖 / 生成物 / 垃圾 / 密钥文件补进 .gitignore
 """
 
@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rules import (  # noqa: E402
-    CONFIG_PATH, DEPENDENCY_DIRS, JUNK_FILE_GLOBS, KNOWN_DIR_PURPOSES, LOCKFILES, OUTPUT_DIRS, SEVERITY_ORDER,
+    CONFIG_PATH, DEPENDENCY_DIRS, LEGACY_CONFIG_PATHS, config_file, JUNK_FILE_GLOBS, KNOWN_DIR_PURPOSES, LOCKFILES, OUTPUT_DIRS, SEVERITY_ORDER,
     SECRET_RULES, SKIP_DIRS, Config, Finding, Project, apply_config, check_path, is_dependency_dir, is_exempt,
     is_output_dir, iter_files, keep_local_match, load_config, matches_any,
 )
@@ -72,6 +72,10 @@ def audit(root: Path, cfg: Config | None = None) -> tuple[list[Finding], dict]:
                     "只保留实际使用的包管理器对应的 lockfile"))
     if cfg.error:
         add(Finding("config-invalid", "error", CONFIG_PATH, cfg.error, "修正 JSON 格式和字段类型，见 references/config.md"))
+    legacy = config_file(root).relative_to(root).as_posix()
+    if legacy in LEGACY_CONFIG_PATHS:
+        add(Finding("config-legacy", "info", legacy, f"配置文件在旧位置，新位置是根目录的 {CONFIG_PATH}",
+                    f"git mv {legacy} {CONFIG_PATH}，让所有 Agent 和工具读同一个位置"))
     elif not cfg.exists:
         add(Finding("no-layout", "info", CONFIG_PATH, "项目没有声明目录约定",
                     f"运行 --init 生成 {CONFIG_PATH}，补全每个目录的用途；hooks 会据此引导 AI 把文件放对位置"))
@@ -320,7 +324,7 @@ def add_review(root: Path, rule: str, path: str, reason: str) -> str:
     findings, _ = audit(root, Config(**{**cfg.__dict__, "reviewed": []}))
     if not any(f.rule == rule and f.path == path for f in findings):
         return f"当前审计结果里没有 [{rule}] {path}，请从报告中复制规则 id 和路径"
-    target = root / CONFIG_PATH
+    target = config_file(root)
     data = json.loads(target.read_text(encoding="utf-8")) if target.is_file() else {}
     entries = [r for r in data.get("reviewed", []) if (r.get("rule"), r.get("path")) != (rule, path)]
     entries.append({"rule": rule, "path": path, "reason": reason.strip(), "sig": signature(root, path)})
@@ -372,10 +376,11 @@ def limit_to_changed(root: Path, findings: list[Finding], changed: set[str], sin
 
 
 def init_config(root: Path) -> Path:
-    """按现有顶层目录生成 .claude/tidy.json 草稿。已存在时不覆盖。"""
+    """按现有顶层目录生成 .tidy.json 草稿。已有配置（含旧版位置）时不覆盖。"""
+    existing = config_file(root)
+    if existing.exists():
+        raise FileExistsError(existing)
     target = root / CONFIG_PATH
-    if target.exists():
-        raise FileExistsError(target)
     proj = Project(root)
     layout = {}
     for p in sorted(root.iterdir()):

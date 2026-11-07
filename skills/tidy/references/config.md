@@ -1,6 +1,6 @@
-# `.claude/tidy.json` 配置说明
+# `.tidy.json` 配置说明
 
-项目级配置，放在 `.claude/` 下（不占根目录）。所有字段都可选；没有这个文件时只启用通用规则。
+项目级配置，放在项目根目录的 `.tidy.json`，所有 Agent 和工具共用这一份。所有字段都可选；没有这个文件时只启用通用规则。旧版位置 `.claude/tidy.json` 仍可读取，审计会提示迁移（`git mv .claude/tidy.json .tidy.json`）。
 
 ## 示例：Remotion 视频项目
 
@@ -41,7 +41,7 @@
 | `disable` | 规则 id 列表 | `[]` | 整个关闭某些规则。只在全项目都不适用时用；只是部分目录例外请用 `allow` 按规则豁免。 |
 | `largeFileMB` | 数字 | `5` | 超过此大小报 `large-file`。 |
 | `maxRootFiles` | 数字 | `15` | 根目录文件数上限。 |
-| `hooks` | 布尔 | `true` | `false` 时该项目关闭所有 hooks（审计脚本仍可用）。 |
+| `hooks` | 布尔 | `true` | `false` 时该项目关闭所有自动检查，包括各 Agent 的 hooks 和 git pre-commit（审计脚本仍可用）。 |
 
 glob 写法：相对项目根；匹配文件本身或它的任一上级目录（`docs/a` 会覆盖 `docs/a/` 下所有文件）；`**` 匹配零到多层目录。
 
